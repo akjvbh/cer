@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import mimetypes
 import os
@@ -29,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import converter
+import pdf_tools
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -59,7 +61,7 @@ MAX_BATCH_SIZE_MB = max(1, _env_int("MAX_BATCH_SIZE_MB", 500))
 MAX_BATCH_BYTES = MAX_BATCH_SIZE_MB * 1024 * 1024
 TASK_TTL_SECONDS = max(60, _env_int("TASK_TTL_SECONDS", 3600))
 CLEANUP_INTERVAL_SECONDS = max(60, _env_int("CLEANUP_INTERVAL_SECONDS", 600))
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 
 TASKS: dict[str, dict[str, Any]] = {}
 TASK_LOCK = threading.RLock()
@@ -584,6 +586,257 @@ def _run_batch(
 
 
 # ---------------------------------------------------------------------------
+# 压缩与 PDF 工具
+# ---------------------------------------------------------------------------
+
+def _json_arg(value: str | None, label: str):
+    text = (value or "").strip()
+    if not text:
+        return None
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ApiError(400, f"{label}格式错误，应为 JSON") from exc
+
+
+def _json_list_arg(value: str | None, label: str) -> list:
+    data = _json_arg(value, label)
+    if data is None:
+        return []
+    if not isinstance(data, list):
+        raise ApiError(400, f"{label}应为 JSON 数组")
+    return data
+
+
+def _json_dict_arg(value: str | None, label: str) -> dict:
+    data = _json_arg(value, label)
+    if data is None:
+        return {}
+    if not isinstance(data, dict):
+        raise ApiError(400, f"{label}应为 JSON 对象")
+    return data
+
+
+def _discard_uploads(paths: list[Path]) -> None:
+    for path in paths:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            LOGGER.debug("删除上传文件失败：%s", path, exc_info=True)
+
+
+def _check_pdf(src: Path, display: str) -> int:
+    try:
+        return pdf_tools.validate_pdf(src)
+    except converter.ConversionError as exc:
+        src.unlink(missing_ok=True)
+        raise ApiError(400, f"文件「{display}」：{exc}") from None
+
+
+def _rename_output(output: Path, base: str, task_id: str) -> Path:
+    suffix = output.suffix.lower()
+    final = output.parent / f"{base}{suffix}"
+    if final.exists():
+        final = output.parent / f"{base}_{task_id[:6]}{suffix}"
+    output.replace(final)
+    return final
+
+
+def _finish_output_task(
+    task_id: str,
+    output: Path,
+    base: str,
+    note: str,
+    target: str,
+    message: str,
+) -> Path:
+    final = _rename_output(output, base, task_id)
+    result = {
+        "filename": final.name,
+        "size": final.stat().st_size,
+        "download_url": f"/api/download/{task_id}",
+        "note": note,
+        "target": target,
+    }
+    _update_task(
+        task_id,
+        status="done",
+        progress=100,
+        message=message,
+        result=result,
+        _path=str(final),
+        _download_name=final.name,
+    )
+    return final
+
+
+def _fail_task(task_id: str, message: str, error: str) -> None:
+    shutil.rmtree(OUTPUTS_DIR / task_id, ignore_errors=True)
+    _update_task(task_id, status="error", progress=100, message=message, error=error)
+
+
+def _start_task_thread(target, *args) -> None:
+    threading.Thread(target=target, args=args, daemon=True).start()
+
+
+def _run_compress(task_id: str, src: Path, display: str, level: str) -> None:
+    _update_task(task_id, status="running", progress=5, message="正在准备压缩")
+
+    def progress(value: int, message: str) -> None:
+        _update_task(task_id, progress=max(5, min(95, int(value))), message=message)
+
+    try:
+        output, note = converter.compress_file(src, OUTPUTS_DIR / task_id, level, progress)
+        _finish_output_task(
+            task_id,
+            output,
+            f"{_safe_stem(display)}_压缩",
+            note,
+            output.suffix.lower().lstrip("."),
+            "压缩完成",
+        )
+    except converter.ConversionError as exc:
+        LOGGER.warning("压缩失败 task=%s: %s", task_id, exc)
+        _fail_task(task_id, "压缩失败", str(exc))
+    except Exception:
+        LOGGER.exception("压缩出现未预期错误 task=%s", task_id)
+        _fail_task(task_id, "压缩失败", "压缩失败，请检查文件是否损坏或稍后重试")
+    finally:
+        src.unlink(missing_ok=True)
+
+
+def _run_pdf_merge(
+    task_id: str,
+    files: list[tuple[Path, str]],
+    mode: str,
+    insert_index: int,
+) -> None:
+    _update_task(task_id, status="running", progress=5, message="正在读取 PDF")
+
+    def progress(value: int, message: str) -> None:
+        _update_task(task_id, progress=max(5, min(95, int(value))), message=message)
+
+    try:
+        output, note = pdf_tools.merge(files, OUTPUTS_DIR / task_id, mode, insert_index, progress)
+        _finish_output_task(task_id, output, "合并结果", note, "pdf", "合并完成")
+    except converter.ConversionError as exc:
+        LOGGER.warning("PDF 合并失败 task=%s: %s", task_id, exc)
+        _fail_task(task_id, "合并失败", str(exc))
+    except Exception:
+        LOGGER.exception("PDF 合并出现未预期错误 task=%s", task_id)
+        _fail_task(task_id, "合并失败", "合并失败，请检查文件是否损坏或稍后重试")
+    finally:
+        for path, _ in files:
+            path.unlink(missing_ok=True)
+
+
+def _run_pdf_ops(
+    task_id: str,
+    src: Path,
+    display: str,
+    delete_pages: list,
+    rotations: dict,
+    page_order: list,
+) -> None:
+    _update_task(task_id, status="running", progress=5, message="正在读取 PDF")
+
+    def progress(value: int, message: str) -> None:
+        _update_task(task_id, progress=max(5, min(95, int(value))), message=message)
+
+    try:
+        output, note = pdf_tools.page_ops(
+            src,
+            OUTPUTS_DIR / task_id,
+            delete_pages,
+            rotations,
+            page_order,
+            progress,
+        )
+        _finish_output_task(
+            task_id,
+            output,
+            f"{_safe_stem(display)}_页面操作",
+            note,
+            "pdf",
+            "页面处理完成",
+        )
+    except converter.ConversionError as exc:
+        LOGGER.warning("PDF 页面操作失败 task=%s: %s", task_id, exc)
+        _fail_task(task_id, "页面处理失败", str(exc))
+    except Exception:
+        LOGGER.exception("PDF 页面操作出现未预期错误 task=%s", task_id)
+        _fail_task(task_id, "页面处理失败", "页面处理失败，请检查文件是否损坏或稍后重试")
+    finally:
+        src.unlink(missing_ok=True)
+
+
+def _run_pdf_to_jpg(
+    task_id: str,
+    files: list[tuple[Path, str]],
+    max_kb: int,
+) -> None:
+    _update_task(
+        task_id,
+        status="running",
+        progress=3,
+        message=f"正在导出 0/{len(files)} 个文件",
+    )
+
+    def progress(value: int, message: str) -> None:
+        _update_task(task_id, progress=max(5, min(95, int(value))), message=message)
+
+    try:
+        zip_path, note, failures = pdf_tools.export_jpg(
+            files,
+            OUTPUTS_DIR / task_id,
+            max_kb,
+            progress,
+        )
+        success = len(files) - len(failures)
+        base = f"{_safe_stem(files[0][1])}_JPG" if len(files) == 1 else "PDF转JPG"
+        final = _rename_output(zip_path, base, task_id)
+        results = [
+            {
+                "filename": item["filename"],
+                "ok": False,
+                "download_url": "",
+                "error": item["error"],
+                "note": "",
+            }
+            for item in failures
+        ]
+        result = {
+            "filename": final.name,
+            "size": final.stat().st_size,
+            "download_url": f"/api/download/{task_id}",
+            "note": note,
+            "target": "jpg",
+            "total_files": len(files),
+            "success_files": success,
+            "failed_files": len(failures),
+            "results": results,
+        }
+        _update_task(
+            task_id,
+            status="done",
+            progress=100,
+            message=f"JPG 导出完成：成功 {success}，失败 {len(failures)}",
+            result=result,
+            _path=str(final),
+            _download_name=final.name,
+        )
+    except converter.ConversionError as exc:
+        LOGGER.warning("JPG 导出失败 task=%s: %s", task_id, exc)
+        _fail_task(task_id, "JPG 导出失败", str(exc))
+    except Exception:
+        LOGGER.exception("JPG 导出出现未预期错误 task=%s", task_id)
+        _fail_task(task_id, "JPG 导出失败", "JPG 导出失败，请检查文件是否损坏或稍后重试")
+    finally:
+        for path, _ in files:
+            path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
 # 接口
 # ---------------------------------------------------------------------------
 
@@ -753,6 +1006,204 @@ async def batch_api(
     )
     EXECUTOR.submit(_run_batch, task_id, saved, len(files), requested, skipped)
     return {"task_id": task_id}
+
+
+@app.post("/api/compress")
+async def compress_api(file: UploadFile = File(...), level: str = Form("80")):
+    display = _sanitize_filename(file.filename)
+    ext = _extension(display)
+    if ext != "pdf" and ext not in converter.IMAGE_EXTS:
+        await file.close()
+        raise ApiError(400, converter.COMPRESS_UNSUPPORTED)
+    level = (level or "80").strip()
+    if level not in converter.COMPRESS_LEVELS:
+        await file.close()
+        raise ApiError(400, "压缩档位无效，只支持 80 / 60 / 40 / 20")
+
+    src, display, size = await _save_upload(file, {"pdf", *converter.IMAGE_EXTS})
+    if ext == "pdf":
+        _check_pdf(src, display)
+
+    task_id = uuid.uuid4().hex
+    _new_task(task_id, display, size, level=level)
+    _start_task_thread(_run_compress, task_id, src, display, level)
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "filename": display,
+        "size": size,
+        "download_url": f"/api/download/{task_id}",
+        "note": "",
+    }
+
+
+@app.post("/api/compress/estimate")
+async def compress_estimate_api(file: UploadFile = File(...)):
+    display = _sanitize_filename(file.filename)
+    ext = _extension(display)
+    if ext != "pdf" and ext not in converter.IMAGE_EXTS:
+        await file.close()
+        raise ApiError(400, converter.COMPRESS_UNSUPPORTED)
+
+    src, display, _ = await _save_upload(file, {"pdf", *converter.IMAGE_EXTS})
+    try:
+        if ext == "pdf":
+            _check_pdf(src, display)
+        return converter.estimate_compression(src)
+    except converter.ConversionError as exc:
+        raise ApiError(400, str(exc)) from None
+    finally:
+        src.unlink(missing_ok=True)
+
+
+@app.post("/api/pdf/merge")
+async def pdf_merge_api(
+    files: list[UploadFile] = File(...),
+    mode: str = Form("append"),
+    insert_index: int = Form(0),
+):
+    mode = (mode or "append").strip().lower()
+    if len(files) < 2:
+        for upload in files:
+            await upload.close()
+        raise ApiError(400, "合并至少需要 2 个 PDF 文件")
+    if mode not in {"append", "interleave", "insert"}:
+        for upload in files:
+            await upload.close()
+        raise ApiError(400, "合并方式无效，只支持 append / interleave / insert")
+
+    saved: list[tuple[Path, str]] = []
+    try:
+        for upload in files:
+            display = _sanitize_filename(upload.filename)
+            if _extension(display) != "pdf":
+                await upload.close()
+                raise ApiError(400, f"文件「{display}」不是 PDF")
+            src, display, _ = await _save_upload(upload, {"pdf"})
+            _check_pdf(src, display)
+            saved.append((src, display))
+
+        if mode == "insert":
+            base_count = pdf_tools.validate_pdf(saved[0][0])
+            if insert_index < 0 or insert_index > base_count:
+                raise ApiError(
+                    400,
+                    f"插入位置应在 0 到 {base_count} 之间（0 表示插到第 1 页之前）",
+                )
+    except ApiError:
+        _discard_uploads([path for path, _ in saved])
+        for upload in files:
+            await upload.close()
+        raise
+    except Exception:
+        _discard_uploads([path for path, _ in saved])
+        for upload in files:
+            await upload.close()
+        LOGGER.exception("PDF 合并上传处理失败")
+        raise ApiError(500, "合并文件上传处理失败，请重试") from None
+
+    total_size = sum(path.stat().st_size for path, _ in saved)
+    task_id = uuid.uuid4().hex
+    _new_task(task_id, f"合并 {len(saved)} 个 PDF", total_size, mode=mode)
+    _start_task_thread(_run_pdf_merge, task_id, saved, mode, insert_index)
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "filename": f"合并 {len(saved)} 个 PDF",
+        "size": total_size,
+        "download_url": f"/api/download/{task_id}",
+        "note": "",
+    }
+
+
+@app.post("/api/pdf/ops")
+async def pdf_ops_api(
+    file: UploadFile = File(...),
+    delete_pages: str = Form(""),
+    rotations: str = Form(""),
+    page_order: str = Form(""),
+):
+    deletes = _json_list_arg(delete_pages, "delete_pages")
+    rotation_map = _json_dict_arg(rotations, "rotations")
+    order = _json_list_arg(page_order, "page_order")
+    if not deletes and not rotation_map and not order:
+        await file.close()
+        raise ApiError(400, "请至少指定删除页、页面顺序或旋转角度")
+
+    src, display, size = await _save_upload(file, {"pdf"})
+    _check_pdf(src, display)
+
+    task_id = uuid.uuid4().hex
+    _new_task(task_id, display, size)
+    _start_task_thread(_run_pdf_ops, task_id, src, display, deletes, rotation_map, order)
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "filename": display,
+        "size": size,
+        "download_url": f"/api/download/{task_id}",
+        "note": "",
+    }
+
+
+@app.post("/api/pdf/preview")
+async def pdf_preview_api(file: UploadFile = File(...), limit: int = Form(50)):
+    src, display, _ = await _save_upload(file, {"pdf"})
+    try:
+        _check_pdf(src, display)
+        return pdf_tools.preview(src, limit)
+    except converter.ConversionError as exc:
+        raise ApiError(400, str(exc)) from None
+    finally:
+        src.unlink(missing_ok=True)
+
+
+@app.post("/api/pdf/to-jpg")
+async def pdf_to_jpg_api(
+    files: list[UploadFile] = File(...),
+    max_kb: int = Form(300),
+):
+    if not files:
+        raise ApiError(400, "请至少选择一个 PDF 文件")
+    if max_kb < 10 or max_kb > 10240:
+        for upload in files:
+            await upload.close()
+        raise ApiError(400, "每张大小上限应在 10KB 到 10240KB 之间")
+
+    saved: list[tuple[Path, str]] = []
+    try:
+        for upload in files:
+            display = _sanitize_filename(upload.filename)
+            if _extension(display) != "pdf":
+                await upload.close()
+                raise ApiError(400, f"文件「{display}」不是 PDF")
+            src, display, _ = await _save_upload(upload, {"pdf"})
+            _check_pdf(src, display)
+            saved.append((src, display))
+    except ApiError:
+        _discard_uploads([path for path, _ in saved])
+        for upload in files:
+            await upload.close()
+        raise
+    except Exception:
+        _discard_uploads([path for path, _ in saved])
+        for upload in files:
+            await upload.close()
+        LOGGER.exception("JPG 导出上传处理失败")
+        raise ApiError(500, "JPG 导出文件上传处理失败，请重试") from None
+
+    total_size = sum(path.stat().st_size for path, _ in saved)
+    task_id = uuid.uuid4().hex
+    _new_task(task_id, f"JPG 导出 {len(saved)} 个 PDF", total_size, max_kb=max_kb)
+    _start_task_thread(_run_pdf_to_jpg, task_id, saved, max_kb)
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "filename": f"JPG 导出 {len(saved)} 个 PDF",
+        "size": total_size,
+        "download_url": f"/api/download/{task_id}",
+        "note": "",
+    }
 
 
 @app.get("/api/tasks/{task_id}")

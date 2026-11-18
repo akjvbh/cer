@@ -53,7 +53,44 @@ const state = {
         maxBatchMb: 500,
         maxFileMb: 200,
     },
+    compress: {
+        file: null,
+        level: "60",
+        busy: false,
+        estimateToken: 0,
+        resultCount: 0,
+    },
+    pdf: {
+        file: null,
+        total: 0,
+        pages: {},
+        order: [],
+        selected: new Set(),
+        rotations: {},
+        deleted: new Set(),
+        loading: false,
+        exporting: false,
+        dragIndex: null,
+        mergeFiles: [],
+        mergeNextId: 1,
+        mergeBusy: false,
+        jpgBusy: false,
+        resultCount: {
+            ops: 0,
+            merge: 0,
+            jpg: 0,
+        },
+    },
 };
+
+const COMPRESS_LEVEL_SPECS = {
+    "80": { dpi: 150, quality: 85, edge: 2400 },
+    "60": { dpi: 120, quality: 75, edge: 1920 },
+    "40": { dpi: 100, quality: 65, edge: 1600 },
+    "20": { dpi: 80, quality: 50, edge: 1280 },
+};
+const COMPRESS_LEVELS = ["80", "60", "40", "20"];
+const COMPRESS_IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"];
 
 const $ = (id) => document.getElementById(id);
 
@@ -1554,6 +1591,1029 @@ function bindBatchEvents() {
     });
 }
 
+/* ---------------------------------------------------------------------------
+   通用任务轮询与结果卡片
+   --------------------------------------------------------------------------- */
+
+function watchTask(taskId, handlers = {}, interval = 800) {
+    let stopped = false;
+    let failures = 0;
+    let timer = null;
+    const stop = () => {
+        stopped = true;
+        window.clearTimeout(timer);
+    };
+    const tick = async () => {
+        if (stopped) {
+            return;
+        }
+        try {
+            const task = await fetchJson(`/api/tasks/${taskId}`, {}, 20000);
+            failures = 0;
+            if (task.status === "done") {
+                stop();
+                if (handlers.onDone) {
+                    handlers.onDone(task);
+                }
+                return;
+            }
+            if (task.status === "error") {
+                stop();
+                if (handlers.onError) {
+                    handlers.onError(task.error || "任务处理失败");
+                }
+                return;
+            }
+            if (handlers.onProgress) {
+                handlers.onProgress(task);
+            }
+            timer = window.setTimeout(tick, interval);
+        } catch (error) {
+            failures += 1;
+            if (failures >= 3) {
+                stop();
+                if (handlers.onError) {
+                    handlers.onError(`无法获取任务状态：${error.message}`);
+                }
+                return;
+            }
+            timer = window.setTimeout(tick, 1200);
+        }
+    };
+    tick();
+    return stop;
+}
+
+function showTaskProgress(prefix, visible) {
+    const panel = $(`${prefix}-progress`);
+    if (panel) {
+        panel.hidden = !visible;
+    }
+}
+
+function setTaskProgress(prefix, percent, message) {
+    const value = Math.max(0, Math.min(100, Math.round(Number(percent) || 0)));
+    const bar = $(`${prefix}-progress-bar`);
+    const numeric = $(`${prefix}-progress-percent`);
+    const label = $(`${prefix}-progress-message`);
+    if (bar) {
+        bar.style.width = `${value}%`;
+    }
+    if (numeric) {
+        numeric.textContent = `${value}%`;
+    }
+    if (label && message) {
+        label.textContent = message;
+    }
+}
+
+function uploadTaskRequest(url, form, onProgress) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open("POST", url, true);
+        xhr.upload.onprogress = (event) => {
+            if (event.lengthComputable && onProgress) {
+                onProgress(Math.round((event.loaded / event.total) * 100));
+            }
+        };
+        xhr.onload = () => {
+            let payload = {};
+            try {
+                payload = JSON.parse(xhr.responseText || "{}");
+            } catch (error) {
+                payload = {};
+            }
+            if (xhr.status >= 200 && xhr.status < 300 && payload.task_id) {
+                resolve(payload);
+            } else {
+                reject(new Error(payload.error || `上传失败（HTTP ${xhr.status}）`));
+            }
+        };
+        xhr.onerror = () => reject(new Error("网络错误，无法连接本地服务"));
+        xhr.onabort = () => reject(new Error("上传已取消"));
+        xhr.send(form);
+    });
+}
+
+function appendOperationResult(listId, result) {
+    const list = $(listId);
+    if (!list) {
+        return;
+    }
+    if (!result) {
+        appendOperationError(listId, "处理完成，但服务没有返回结果信息");
+        return;
+    }
+    const card = document.createElement("article");
+    card.className = "result-card success";
+
+    const status = document.createElement("div");
+    status.className = "result-status";
+    status.innerHTML = iconSvg("check");
+
+    const body = document.createElement("div");
+    body.className = "result-body";
+
+    const name = document.createElement("p");
+    name.className = "result-name";
+    name.textContent = result.filename || "处理结果";
+
+    const meta = document.createElement("p");
+    meta.className = "result-meta";
+    const target = result.target ? String(result.target).toUpperCase() : "";
+    const counts = Number(result.total_files) > 0
+        ? `成功 ${Number(result.success_files) || 0} / 失败 ${Number(result.failed_files) || 0}`
+        : "";
+    meta.textContent = [formatBytes(result.size), target, counts].filter(Boolean).join(" · ");
+    body.append(name, meta);
+
+    if (result.note) {
+        const note = document.createElement("p");
+        note.className = "result-note";
+        note.textContent = result.note;
+        body.append(note);
+    }
+
+    const failures = Array.isArray(result.results)
+        ? result.results.filter((item) => item && item.ok === false)
+        : [];
+    if (failures.length) {
+        const failureList = document.createElement("div");
+        failureList.className = "result-note";
+        failures.forEach((item) => {
+            const line = document.createElement("p");
+            line.textContent = `${item.filename || "文件"}：${item.error || "处理失败"}`;
+            failureList.append(line);
+        });
+        body.append(failureList);
+    }
+
+    const actions = document.createElement("div");
+    actions.className = "result-actions";
+    const url = safeDownloadUrl(result.download_url);
+    if (url) {
+        const download = document.createElement("a");
+        download.className = "download-link";
+        download.href = url;
+        download.setAttribute("download", "");
+        download.innerHTML = `${iconSvg("download")}<span>下载结果</span>`;
+        actions.append(download);
+    }
+    if (failures.length) {
+        const copy = document.createElement("button");
+        copy.className = "copy-button";
+        copy.type = "button";
+        copy.dataset.action = "copy-error";
+        copy.textContent = "复制失败原因";
+        actions.append(copy);
+    }
+    if (actions.children.length) {
+        body.append(actions);
+    }
+
+    card.append(status, body);
+    list.append(card);
+    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function appendOperationError(listId, message, title = "处理失败") {
+    const list = $(listId);
+    if (!list) {
+        return;
+    }
+    const card = document.createElement("article");
+    card.className = "result-card error";
+
+    const status = document.createElement("div");
+    status.className = "result-status";
+    status.innerHTML = iconSvg("x");
+
+    const body = document.createElement("div");
+    body.className = "result-body";
+
+    const heading = document.createElement("p");
+    heading.className = "result-name";
+    heading.textContent = title;
+
+    const note = document.createElement("p");
+    note.className = "result-note";
+    note.textContent = message || "处理失败，请重试";
+
+    const actions = document.createElement("div");
+    actions.className = "result-actions";
+    const copy = document.createElement("button");
+    copy.className = "copy-button";
+    copy.type = "button";
+    copy.dataset.action = "copy-error";
+    copy.textContent = "复制错误信息";
+    actions.append(copy);
+
+    body.append(heading, note, actions);
+    card.append(status, body);
+    list.append(card);
+    card.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+/* ---------------------------------------------------------------------------
+   压缩
+   --------------------------------------------------------------------------- */
+
+function isPdfFile(file) {
+    return Boolean(file) && getExtension(file.name) === "pdf";
+}
+
+function isCompressibleFile(file) {
+    if (!file) {
+        return false;
+    }
+    const ext = getExtension(file.name);
+    return ext === "pdf" || COMPRESS_IMAGE_EXTS.includes(ext);
+}
+
+function compressLevelSpec(level) {
+    return COMPRESS_LEVEL_SPECS[String(level)] || COMPRESS_LEVEL_SPECS["60"];
+}
+
+function updateCompressLevelUi() {
+    document.querySelectorAll("#compress-levels .level-card").forEach((button) => {
+        button.classList.toggle("is-active", button.dataset.level === state.compress.level);
+    });
+    const spec = compressLevelSpec(state.compress.level);
+    const ext = state.compress.file ? getExtension(state.compress.file.name) : "";
+    if (ext === "pdf") {
+        $("compress-level-hint").textContent =
+            `PDF：${spec.dpi} DPI / quality ${spec.quality}；文字层会在压缩后丢失。`;
+    } else if (ext === "png") {
+        $("compress-level-hint").textContent =
+            `PNG：最长边限制 ${spec.edge} 像素；PNG 为无损格式，档位主要影响尺寸。`;
+    } else {
+        $("compress-level-hint").textContent =
+            `图片：最长边限制 ${spec.edge} 像素 / quality ${spec.quality}。`;
+    }
+}
+
+function updateCompressUi() {
+    const file = state.compress.file;
+    const button = $("compress-btn");
+    button.disabled = state.compress.busy || !file;
+    $("compress-btn-text").textContent = state.compress.busy ? "压缩中…" : "开始压缩";
+    $("compress-remove").disabled = state.compress.busy || !file;
+    $("compress-dropzone").classList.toggle("is-disabled", state.compress.busy);
+    $("compress-warning").hidden = !(file && isPdfFile(file));
+    $("compress-dropzone").setAttribute("aria-disabled", state.compress.busy ? "true" : "false");
+    updateCompressLevelUi();
+}
+
+function setCompressFile(file) {
+    if (!file || state.compress.busy) {
+        return;
+    }
+    if (!isCompressibleFile(file)) {
+        showToast("该格式不支持压缩，本版只支持 PDF 和图片", "error");
+        return;
+    }
+    if (file.size === 0) {
+        showToast("这个文件是空的，请选择有内容的文件", "error");
+        return;
+    }
+    if (file.size > state.maxFileMb * 1024 * 1024) {
+        showToast(`文件超过 ${state.maxFileMb}MB 上限`, "error");
+        return;
+    }
+    const ext = getExtension(file.name);
+    state.compress.file = file;
+    const icon = $("compress-file-icon");
+    icon.textContent = ext.toUpperCase().slice(0, 4);
+    icon.className = `file-icon kind-${ext === "pdf" ? "pdf" : "image"}`;
+    $("compress-file-name").textContent = file.name;
+    $("compress-file-size").textContent = `${formatBytes(file.size)} · ${ext.toUpperCase()} 文件`;
+    $("compress-selected").hidden = false;
+    updateCompressUi();
+    estimateCompression(file);
+}
+
+function clearCompressFile() {
+    if (state.compress.busy) {
+        showToast("压缩进行中，请完成后再移除文件", "warning");
+        return;
+    }
+    state.compress.file = null;
+    state.compress.estimateToken += 1;
+    $("compress-file-input").value = "";
+    $("compress-selected").hidden = true;
+    $("compress-estimate").hidden = true;
+    $("estimate-rows").replaceChildren();
+    updateCompressUi();
+}
+
+function renderEstimate(data) {
+    const card = $("compress-estimate");
+    const rows = $("estimate-rows");
+    const original = Number(data && data.original_size) || 0;
+    const levels = data && data.levels ? data.levels : {};
+    const values = COMPRESS_LEVELS
+        .map((level) => Number(levels[level]) || 0)
+        .filter((value) => value > 0);
+    const baseline = Math.max(original, ...values, 1);
+
+    const makeRow = (label, value, ratioText, extraClass = "") => {
+        const row = document.createElement("div");
+        row.className = `estimate-row ${extraClass}`.trim();
+        const level = document.createElement("span");
+        level.className = "estimate-level";
+        level.textContent = label;
+        const size = document.createElement("span");
+        size.className = "estimate-size";
+        size.textContent = formatBytes(value);
+        const track = document.createElement("div");
+        track.className = "estimate-track";
+        const bar = document.createElement("span");
+        bar.style.width = `${Math.max(2, Math.min(100, Math.round((value / baseline) * 100)))}%`;
+        track.append(bar);
+        const ratio = document.createElement("span");
+        ratio.className = "estimate-ratio";
+        ratio.textContent = ratioText;
+        row.append(level, size, track, ratio);
+        return row;
+    };
+
+    const nodes = [makeRow("原文件", original, "100%", "original")];
+    COMPRESS_LEVELS.forEach((level) => {
+        const value = Number(levels[level]) || 0;
+        const ratio = original > 0 ? `${Math.round((value / original) * 100)}%` : "—";
+        nodes.push(makeRow(level, value, ratio));
+    });
+    rows.replaceChildren(...nodes);
+
+    const sampled = Number(data && data.sampled_pages) || 0;
+    const ext = state.compress.file ? getExtension(state.compress.file.name) : "";
+    $("estimate-note").textContent = ext === "pdf"
+        ? `按前 ${sampled} 页抽样估算，实际以完整压缩为准`
+        : "按图片实际重采样计算";
+    card.hidden = false;
+}
+
+async function estimateCompression(file) {
+    const token = state.compress.estimateToken + 1;
+    state.compress.estimateToken = token;
+    $("compress-estimate").hidden = false;
+    $("estimate-note").textContent = "正在估算…";
+    const placeholder = document.createElement("p");
+    placeholder.className = "form-hint";
+    placeholder.textContent = "正在抽样计算四档体积，请稍候…";
+    $("estimate-rows").replaceChildren(placeholder);
+
+    const form = new FormData();
+    form.append("file", file, file.name);
+    try {
+        const data = await fetchJson("/api/compress/estimate", { method: "POST", body: form }, 120000);
+        if (state.compress.estimateToken !== token) {
+            return;
+        }
+        renderEstimate(data);
+    } catch (error) {
+        if (state.compress.estimateToken !== token) {
+            return;
+        }
+        const note = document.createElement("p");
+        note.className = "form-hint";
+        note.textContent = `体积预估失败：${error.message}`;
+        $("estimate-rows").replaceChildren(note);
+        $("estimate-note").textContent = "预估不可用";
+    }
+}
+
+function askCompressConfirm() {
+    const dialog = $("compress-confirm-dialog");
+    if (!dialog || typeof dialog.showModal !== "function") {
+        return Promise.resolve(true);
+    }
+    return new Promise((resolve) => {
+        const controller = new AbortController();
+        const finish = (value) => {
+            controller.abort();
+            if (dialog.open) {
+                dialog.close();
+            }
+            resolve(value);
+        };
+        const options = { signal: controller.signal };
+        $("compress-confirm-ok").addEventListener("click", () => finish(true), options);
+        $("compress-confirm-cancel").addEventListener("click", () => finish(false), options);
+        dialog.addEventListener("cancel", () => finish(false), options);
+        dialog.showModal();
+    });
+}
+
+async function startCompress() {
+    const file = state.compress.file;
+    if (!file || state.compress.busy) {
+        return;
+    }
+    if (isPdfFile(file) && !(await askCompressConfirm())) {
+        return;
+    }
+    state.compress.busy = true;
+    updateCompressUi();
+    showTaskProgress("compress", true);
+    setTaskProgress("compress", 0, "正在上传文件");
+
+    const form = new FormData();
+    form.append("file", file, file.name);
+    form.append("level", state.compress.level);
+    try {
+        const data = await uploadTaskRequest("/api/compress", form, (percent) => {
+            setTaskProgress("compress", Math.round(percent * 0.3), `正在上传 ${percent}%`);
+        });
+        setTaskProgress("compress", 32, "已提交，正在压缩");
+        watchTask(data.task_id, {
+            onProgress: (task) => {
+                setTaskProgress("compress", 32 + Math.round((Number(task.progress) || 0) * 0.68), task.message || "正在压缩");
+            },
+            onDone: (task) => {
+                state.compress.busy = false;
+                state.compress.resultCount += 1;
+                $("compress-result-tag").textContent = `${state.compress.resultCount} 个`;
+                appendOperationResult("compress-result-list", task.result);
+                $("compress-empty").hidden = true;
+                setTaskProgress("compress", 100, "压缩完成");
+                showToast("压缩完成", "success");
+                updateCompressUi();
+                window.setTimeout(() => showTaskProgress("compress", false), 800);
+            },
+            onError: (message) => {
+                state.compress.busy = false;
+                appendOperationError("compress-result-list", message, "压缩失败");
+                $("compress-empty").hidden = true;
+                showToast(message || "压缩失败", "error");
+                updateCompressUi();
+                showTaskProgress("compress", false);
+            },
+        });
+    } catch (error) {
+        state.compress.busy = false;
+        appendOperationError("compress-result-list", error.message || "上传失败", "压缩失败");
+        showToast(error.message || "上传失败", "error");
+        updateCompressUi();
+        showTaskProgress("compress", false);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   PDF 页面编辑
+   --------------------------------------------------------------------------- */
+
+function pdfPreviewIndices() {
+    return state.pdf.order.filter((index) => Boolean(state.pdf.pages[index]));
+}
+
+function updatePdfButtons() {
+    const busy = state.pdf.loading || state.pdf.exporting;
+    [
+        "pdf-select-all",
+        "pdf-invert",
+        "pdf-rotate-selected",
+        "pdf-delete-selected",
+        "pdf-reset-order",
+        "pdf-export",
+    ].forEach((id) => {
+        const button = $(id);
+        if (button) {
+            button.disabled = busy;
+        }
+    });
+    $("pdf-jpg-btn").disabled = busy || !state.pdf.file;
+    $("pdf-remove").disabled = busy || !state.pdf.file;
+    $("pdf-dropzone").classList.toggle("is-disabled", busy);
+}
+
+function updatePdfStats() {
+    const total = state.pdf.total;
+    const remaining = state.pdf.order.length;
+    const selected = state.pdf.selected.size;
+    const extra = remaining !== total ? `（原文件 ${total} 页）` : "";
+    $("pdf-stats").textContent = `共 ${remaining} 页${extra}，已选 ${selected} 页`;
+    $("pdf-page-tag").textContent = state.pdf.file ? `共 ${total} 页` : "未加载";
+}
+
+function renderPdfGrid() {
+    const grid = $("pdf-grid");
+    const visible = pdfPreviewIndices();
+    if (!visible.length) {
+        const note = document.createElement("p");
+        note.className = "pdf-empty-note";
+        note.textContent = "所有页面都已删除，可以点「恢复原顺序」找回。";
+        grid.replaceChildren(note);
+        updatePdfStats();
+        updatePdfButtons();
+        return;
+    }
+
+    const nodes = visible.map((index) => {
+        const meta = state.pdf.pages[index];
+        const offset = Number(state.pdf.rotations[index]) || 0;
+        const finalRotation = ((Number(meta.rotation) || 0) + offset + 360) % 360;
+        const card = document.createElement("article");
+        card.className = "pdf-page-card";
+        card.dataset.index = String(index);
+        card.draggable = state.pdf.selected.has(index);
+        if (state.pdf.selected.has(index)) {
+            card.classList.add("is-selected");
+        }
+
+        const thumbWrap = document.createElement("div");
+        thumbWrap.className = "pdf-thumb-wrap";
+        const image = document.createElement("img");
+        image.className = "pdf-thumb";
+        image.alt = `第 ${index} 页缩略图`;
+        image.src = `data:image/png;base64,${meta.png_base64}`;
+        image.style.transform = `rotate(${finalRotation}deg)`;
+        thumbWrap.append(image);
+        if (finalRotation !== 0) {
+            const tag = document.createElement("span");
+            tag.className = "pdf-rotation-tag";
+            tag.textContent = `${finalRotation}°`;
+            thumbWrap.append(tag);
+        }
+
+        const foot = document.createElement("div");
+        foot.className = "pdf-page-foot";
+        const label = document.createElement("label");
+        label.className = "pdf-page-check";
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.checked = state.pdf.selected.has(index);
+        checkbox.dataset.action = "toggle-page";
+        checkbox.dataset.index = String(index);
+        label.append(checkbox, document.createTextNode(`第 ${index} 页`));
+
+        const actions = document.createElement("div");
+        actions.className = "pdf-page-actions";
+        const rotate = document.createElement("button");
+        rotate.type = "button";
+        rotate.dataset.action = "rotate-page";
+        rotate.dataset.index = String(index);
+        rotate.title = "顺时针旋转 90°";
+        rotate.textContent = "↻";
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.dataset.action = "delete-page";
+        remove.dataset.index = String(index);
+        remove.title = "删除这一页";
+        remove.textContent = "×";
+        actions.append(rotate, remove);
+        foot.append(label, actions);
+
+        card.append(thumbWrap, foot);
+        return card;
+    });
+    grid.replaceChildren(...nodes);
+    updatePdfStats();
+    updatePdfButtons();
+}
+
+async function loadPdfForEditing(file) {
+    if (!file || state.pdf.loading || state.pdf.exporting) {
+        return;
+    }
+    if (!isPdfFile(file)) {
+        showToast("PDF 工具只接受 PDF 文件", "error");
+        return;
+    }
+    if (file.size === 0) {
+        showToast("这个文件是空的，请选择有内容的文件", "error");
+        return;
+    }
+    if (file.size > state.maxFileMb * 1024 * 1024) {
+        showToast(`文件超过 ${state.maxFileMb}MB 上限`, "error");
+        return;
+    }
+
+    state.pdf.loading = true;
+    state.pdf.file = file;
+    state.pdf.pages = {};
+    state.pdf.order = [];
+    state.pdf.selected = new Set();
+    state.pdf.rotations = {};
+    state.pdf.deleted = new Set();
+    $("pdf-file-name").textContent = file.name;
+    $("pdf-file-size").textContent = `${formatBytes(file.size)} · PDF 文件`;
+    $("pdf-selected").hidden = false;
+    $("pdf-empty").hidden = true;
+    $("pdf-editor").hidden = true;
+    $("pdf-page-tag").textContent = "正在加载";
+    showTaskProgress("pdf", true);
+    setTaskProgress("pdf", 10, "正在生成缩略图");
+    updatePdfButtons();
+
+    const form = new FormData();
+    form.append("file", file, file.name);
+    form.append("limit", "50");
+    try {
+        const data = await fetchJson("/api/pdf/preview", { method: "POST", body: form }, 180000);
+        const pages = Array.isArray(data && data.pages) ? data.pages : [];
+        if (!pages.length) {
+            throw new Error("这个 PDF 没有可预览的页面");
+        }
+        state.pdf.pages = {};
+        pages.forEach((page) => {
+            state.pdf.pages[Number(page.index)] = page;
+        });
+        state.pdf.total = Number(data.total) > 0 ? Number(data.total) : pages.length;
+        state.pdf.order = Array.from({ length: state.pdf.total }, (_, index) => index + 1);
+        state.pdf.selected = new Set();
+        state.pdf.rotations = {};
+        state.pdf.deleted = new Set();
+        $("pdf-editor").hidden = false;
+        $("pdf-truncated").hidden = !data.truncated;
+        renderPdfGrid();
+        setTaskProgress("pdf", 100, "缩略图已生成");
+        window.setTimeout(() => showTaskProgress("pdf", false), 600);
+    } catch (error) {
+        state.pdf.loading = false;
+        clearPdfFile();
+        showToast(error.message || "PDF 预览失败", "error");
+    } finally {
+        state.pdf.loading = false;
+        updatePdfButtons();
+    }
+}
+
+function clearPdfFile() {
+    if (state.pdf.loading || state.pdf.exporting) {
+        return;
+    }
+    state.pdf.file = null;
+    state.pdf.pages = {};
+    state.pdf.total = 0;
+    state.pdf.order = [];
+    state.pdf.selected = new Set();
+    state.pdf.rotations = {};
+    state.pdf.deleted = new Set();
+    $("pdf-file-input").value = "";
+    $("pdf-selected").hidden = true;
+    $("pdf-editor").hidden = true;
+    $("pdf-empty").hidden = false;
+    $("pdf-grid").replaceChildren();
+    $("pdf-result-list").replaceChildren();
+    $("pdf-page-tag").textContent = "未加载";
+    showTaskProgress("pdf", false);
+    updatePdfStats();
+    updatePdfButtons();
+}
+
+function rotatePdfPage(index) {
+    const current = Number(state.pdf.rotations[index]) || 0;
+    state.pdf.rotations[index] = (current + 90) % 360;
+    renderPdfGrid();
+}
+
+function deletePdfPage(index) {
+    const position = state.pdf.order.indexOf(index);
+    if (position < 0) {
+        return;
+    }
+    state.pdf.order.splice(position, 1);
+    state.pdf.selected.delete(index);
+    state.pdf.deleted.add(index);
+    renderPdfGrid();
+}
+
+function togglePdfSelection(index, selected) {
+    if (selected) {
+        state.pdf.selected.add(index);
+    } else {
+        state.pdf.selected.delete(index);
+    }
+    const card = $("pdf-grid").querySelector(`.pdf-page-card[data-index="${index}"]`);
+    if (card) {
+        card.classList.toggle("is-selected", selected);
+        card.draggable = selected;
+    }
+    updatePdfStats();
+}
+
+function selectAllPdfPages() {
+    pdfPreviewIndices().forEach((index) => state.pdf.selected.add(index));
+    renderPdfGrid();
+}
+
+function invertPdfSelection() {
+    pdfPreviewIndices().forEach((index) => {
+        if (state.pdf.selected.has(index)) {
+            state.pdf.selected.delete(index);
+        } else {
+            state.pdf.selected.add(index);
+        }
+    });
+    renderPdfGrid();
+}
+
+function rotateSelectedPdfPages() {
+    if (!state.pdf.selected.size) {
+        showToast("请先勾选要旋转的页面", "info");
+        return;
+    }
+    state.pdf.selected.forEach((index) => {
+        const current = Number(state.pdf.rotations[index]) || 0;
+        state.pdf.rotations[index] = (current + 90) % 360;
+    });
+    renderPdfGrid();
+}
+
+function deleteSelectedPdfPages() {
+    if (!state.pdf.selected.size) {
+        showToast("请先勾选要删除的页面", "info");
+        return;
+    }
+    state.pdf.selected.forEach((index) => {
+        const position = state.pdf.order.indexOf(index);
+        if (position >= 0) {
+            state.pdf.order.splice(position, 1);
+        }
+        state.pdf.deleted.add(index);
+    });
+    state.pdf.selected = new Set();
+    renderPdfGrid();
+}
+
+function resetPdfOrder() {
+    state.pdf.order = Array.from({ length: state.pdf.total }, (_, index) => index + 1);
+    state.pdf.deleted = new Set();
+    state.pdf.selected = new Set(
+        Array.from(state.pdf.selected).filter((index) => Boolean(state.pdf.pages[index]))
+    );
+    renderPdfGrid();
+}
+
+function reorderPdfPages(fromIndex, toIndex) {
+    const order = state.pdf.order;
+    const from = order.indexOf(fromIndex);
+    const to = order.indexOf(toIndex);
+    if (from < 0 || to < 0 || from === to) {
+        return;
+    }
+    order.splice(from, 1);
+    const insert = from < to ? to - 1 : to;
+    order.splice(insert, 0, fromIndex);
+    renderPdfGrid();
+}
+
+async function exportPdfOps() {
+    if (!state.pdf.file || state.pdf.exporting || state.pdf.loading) {
+        return;
+    }
+    const rotationPayload = {};
+    Object.entries(state.pdf.rotations).forEach(([key, offset]) => {
+        const index = Number(key);
+        const meta = state.pdf.pages[index];
+        const angle = Number(offset) || 0;
+        if (!meta || angle % 360 === 0) {
+            return;
+        }
+        const finalAngle = ((Number(meta.rotation) || 0) + angle + 360) % 360;
+        if (finalAngle !== (Number(meta.rotation) || 0)) {
+            rotationPayload[String(index)] = finalAngle;
+        }
+    });
+    const deleted = Array.from(state.pdf.deleted).sort((a, b) => a - b);
+    const remaining = [];
+    for (let index = 1; index <= state.pdf.total; index += 1) {
+        if (!state.pdf.deleted.has(index)) {
+            remaining.push(index);
+        }
+    }
+    const orderChanged = state.pdf.order.length !== remaining.length
+        || state.pdf.order.some((value, index) => value !== remaining[index]);
+    if (!orderChanged && !deleted.length && !Object.keys(rotationPayload).length) {
+        showToast("没有需要应用的修改", "info");
+        return;
+    }
+
+    state.pdf.exporting = true;
+    updatePdfButtons();
+    showTaskProgress("pdf", true);
+    setTaskProgress("pdf", 5, "正在提交页面操作");
+    const form = new FormData();
+    form.append("file", state.pdf.file, state.pdf.file.name);
+    form.append("page_order", JSON.stringify(orderChanged ? state.pdf.order : []));
+    form.append("rotations", JSON.stringify(rotationPayload));
+    form.append("delete_pages", JSON.stringify(deleted));
+    try {
+        const data = await uploadTaskRequest("/api/pdf/ops", form, (percent) => {
+            setTaskProgress("pdf", Math.round(percent * 0.2), `正在上传 ${percent}%`);
+        });
+        setTaskProgress("pdf", 25, "已提交，正在处理页面");
+        watchTask(data.task_id, {
+            onProgress: (task) => {
+                setTaskProgress("pdf", 25 + Math.round((Number(task.progress) || 0) * 0.7), task.message || "正在处理页面");
+            },
+            onDone: (task) => {
+                state.pdf.exporting = false;
+                appendOperationResult("pdf-result-list", task.result);
+                state.pdf.resultCount.ops += 1;
+                setTaskProgress("pdf", 100, "页面处理完成");
+                showToast("页面处理完成", "success");
+                updatePdfButtons();
+                window.setTimeout(() => showTaskProgress("pdf", false), 800);
+            },
+            onError: (message) => {
+                state.pdf.exporting = false;
+                appendOperationError("pdf-result-list", message, "页面处理失败");
+                showToast(message || "页面处理失败", "error");
+                updatePdfButtons();
+                showTaskProgress("pdf", false);
+            },
+        });
+    } catch (error) {
+        state.pdf.exporting = false;
+        appendOperationError("pdf-result-list", error.message || "上传失败", "页面处理失败");
+        showToast(error.message || "上传失败", "error");
+        updatePdfButtons();
+        showTaskProgress("pdf", false);
+    }
+}
+
+async function exportPdfJpg() {
+    if (!state.pdf.file || state.pdf.jpgBusy || state.pdf.loading) {
+        showToast("请先加载一个 PDF", "info");
+        return;
+    }
+    const maxKb = Number($("jpg-max-kb").value);
+    if (!Number.isFinite(maxKb) || maxKb < 10 || maxKb > 10240) {
+        showToast("每张上限应在 10KB 到 10240KB 之间", "error");
+        return;
+    }
+    state.pdf.jpgBusy = true;
+    updatePdfButtons();
+    showTaskProgress("jpg", true);
+    setTaskProgress("jpg", 5, "正在上传 PDF");
+    const form = new FormData();
+    form.append("files", state.pdf.file, state.pdf.file.name);
+    form.append("max_kb", String(Math.round(maxKb)));
+    try {
+        const data = await uploadTaskRequest("/api/pdf/to-jpg", form, (percent) => {
+            setTaskProgress("jpg", Math.round(percent * 0.2), `正在上传 ${percent}%`);
+        });
+        setTaskProgress("jpg", 25, "已提交，正在导出 JPG");
+        watchTask(data.task_id, {
+            onProgress: (task) => {
+                setTaskProgress("jpg", 25 + Math.round((Number(task.progress) || 0) * 0.7), task.message || "正在导出 JPG");
+            },
+            onDone: (task) => {
+                state.pdf.jpgBusy = false;
+                appendOperationResult("jpg-result-list", task.result);
+                state.pdf.resultCount.jpg += 1;
+                setTaskProgress("jpg", 100, "JPG 导出完成");
+                showToast("JPG 导出完成", "success");
+                updatePdfButtons();
+                window.setTimeout(() => showTaskProgress("jpg", false), 800);
+            },
+            onError: (message) => {
+                state.pdf.jpgBusy = false;
+                appendOperationError("jpg-result-list", message, "JPG 导出失败");
+                showToast(message || "JPG 导出失败", "error");
+                updatePdfButtons();
+                showTaskProgress("jpg", false);
+            },
+        });
+    } catch (error) {
+        state.pdf.jpgBusy = false;
+        appendOperationError("jpg-result-list", error.message || "上传失败", "JPG 导出失败");
+        showToast(error.message || "上传失败", "error");
+        updatePdfButtons();
+        showTaskProgress("jpg", false);
+    }
+}
+
+/* ---------------------------------------------------------------------------
+   PDF 合并
+   --------------------------------------------------------------------------- */
+
+function updateMergeUi() {
+    $("merge-count").textContent = `${state.pdf.mergeFiles.length} 个`;
+    $("merge-btn").disabled = state.pdf.mergeBusy || state.pdf.mergeFiles.length < 2;
+    $("merge-btn-text").textContent = state.pdf.mergeBusy ? "合并中…" : "开始合并";
+    $("merge-pick").disabled = state.pdf.mergeBusy;
+    $("merge-mode").disabled = state.pdf.mergeBusy;
+    $("merge-insert").disabled = state.pdf.mergeBusy;
+    $("merge-insert-row").hidden = $("merge-mode").value !== "insert";
+}
+
+function renderMergeList() {
+    const list = $("merge-list");
+    if (!state.pdf.mergeFiles.length) {
+        const empty = document.createElement("p");
+        empty.className = "merge-empty";
+        empty.textContent = "还没有选择 PDF";
+        list.replaceChildren(empty);
+        updateMergeUi();
+        return;
+    }
+    const nodes = state.pdf.mergeFiles.map((item, index) => {
+        const row = document.createElement("div");
+        row.className = "merge-item";
+        const order = document.createElement("span");
+        order.className = "merge-index";
+        order.textContent = String(index + 1);
+        const name = document.createElement("span");
+        name.className = "merge-name";
+        name.textContent = item.file.name;
+        const size = document.createElement("span");
+        size.className = "merge-size";
+        size.textContent = formatBytes(item.file.size);
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.dataset.action = "remove-merge-file";
+        remove.dataset.id = String(item.id);
+        remove.title = "移除";
+        remove.textContent = "×";
+        row.append(order, name, size, remove);
+        return row;
+    });
+    list.replaceChildren(...nodes);
+    updateMergeUi();
+}
+
+function addMergeFiles(files) {
+    const incoming = Array.from(files || []);
+    const invalid = incoming.filter((file) => !isPdfFile(file));
+    if (invalid.length) {
+        showToast(`已忽略 ${invalid.length} 个非 PDF 文件`, "warning");
+    }
+    const accepted = incoming.filter((file) => isPdfFile(file) && file.size > 0);
+    accepted.forEach((file) => {
+        if (file.size > state.maxFileMb * 1024 * 1024) {
+            showToast(`${file.name} 超过 ${state.maxFileMb}MB 上限`, "error");
+            return;
+        }
+        state.pdf.mergeFiles.push({ id: state.pdf.mergeNextId, file });
+        state.pdf.mergeNextId += 1;
+    });
+    renderMergeList();
+}
+
+function removeMergeFile(id) {
+    state.pdf.mergeFiles = state.pdf.mergeFiles.filter((item) => item.id !== id);
+    renderMergeList();
+}
+
+async function startMerge() {
+    if (state.pdf.mergeBusy || state.pdf.mergeFiles.length < 2) {
+        return;
+    }
+    const mode = $("merge-mode").value;
+    const insertIndex = Number($("merge-insert").value);
+    if (mode === "insert" && (!Number.isInteger(insertIndex) || insertIndex < 0)) {
+        showToast("插入位置必须是 0 或更大的整数", "error");
+        return;
+    }
+
+    state.pdf.mergeBusy = true;
+    updateMergeUi();
+    showTaskProgress("merge", true);
+    setTaskProgress("merge", 3, "正在上传 PDF");
+    const form = new FormData();
+    state.pdf.mergeFiles.forEach((item) => {
+        form.append("files", item.file, item.file.name);
+    });
+    form.append("mode", mode);
+    form.append("insert_index", String(mode === "insert" ? insertIndex : 0));
+    try {
+        const data = await uploadTaskRequest("/api/pdf/merge", form, (percent) => {
+            setTaskProgress("merge", Math.round(percent * 0.2), `正在上传 ${percent}%`);
+        });
+        setTaskProgress("merge", 25, "已提交，正在合并");
+        watchTask(data.task_id, {
+            onProgress: (task) => {
+                setTaskProgress("merge", 25 + Math.round((Number(task.progress) || 0) * 0.7), task.message || "正在合并");
+            },
+            onDone: (task) => {
+                state.pdf.mergeBusy = false;
+                appendOperationResult("merge-result-list", task.result);
+                state.pdf.resultCount.merge += 1;
+                setTaskProgress("merge", 100, "合并完成");
+                showToast("合并完成", "success");
+                updateMergeUi();
+                window.setTimeout(() => showTaskProgress("merge", false), 800);
+            },
+            onError: (message) => {
+                state.pdf.mergeBusy = false;
+                appendOperationError("merge-result-list", message, "合并失败");
+                showToast(message || "合并失败", "error");
+                updateMergeUi();
+                showTaskProgress("merge", false);
+            },
+        });
+    } catch (error) {
+        state.pdf.mergeBusy = false;
+        appendOperationError("merge-result-list", error.message || "上传失败", "合并失败");
+        showToast(error.message || "上传失败", "error");
+        updateMergeUi();
+        showTaskProgress("merge", false);
+    }
+}
+
 function activatePage(page) {
     document.querySelectorAll(".nav-item").forEach((item) => {
         item.classList.toggle("active", item.dataset.page === page);
@@ -1581,6 +2641,251 @@ function dropHasDirectory(dataTransfer) {
         }
         const entry = item.webkitGetAsEntry();
         return Boolean(entry && entry.isDirectory);
+    });
+}
+
+function bindCompressEvents() {
+    const dropzone = $("compress-dropzone");
+    const input = $("compress-file-input");
+    dropzone.addEventListener("click", (event) => {
+        if (event.target === input) {
+            return;
+        }
+        if (state.compress.busy) {
+            showToast("压缩进行中，请稍候", "warning");
+            return;
+        }
+        input.click();
+    });
+    dropzone.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            dropzone.click();
+        }
+    });
+    input.addEventListener("change", () => {
+        const file = input.files && input.files[0];
+        input.value = "";
+        if (file) {
+            setCompressFile(file);
+        }
+    });
+    ["dragenter", "dragover"].forEach((name) => {
+        dropzone.addEventListener(name, (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!state.compress.busy) {
+                dropzone.classList.add("dragover");
+            }
+        });
+    });
+    ["dragleave", "drop"].forEach((name) => {
+        dropzone.addEventListener(name, (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            dropzone.classList.remove("dragover");
+        });
+    });
+    dropzone.addEventListener("drop", (event) => {
+        if (state.compress.busy) {
+            showToast("压缩进行中，请稍候", "warning");
+            return;
+        }
+        const files = event.dataTransfer && event.dataTransfer.files
+            ? Array.from(event.dataTransfer.files)
+            : [];
+        if (files.length > 1) {
+            showToast("压缩一次只处理一个文件，请只选择一个", "info");
+            return;
+        }
+        if (files[0]) {
+            setCompressFile(files[0]);
+        }
+    });
+
+    $("compress-remove").addEventListener("click", clearCompressFile);
+    $("compress-levels").addEventListener("click", (event) => {
+        const button = event.target.closest("[data-level]");
+        if (!button || state.compress.busy) {
+            return;
+        }
+        state.compress.level = button.dataset.level;
+        updateCompressUi();
+    });
+    $("compress-btn").addEventListener("click", startCompress);
+}
+
+function bindPdfEvents() {
+    const dropzone = $("pdf-dropzone");
+    const input = $("pdf-file-input");
+    dropzone.addEventListener("click", (event) => {
+        if (event.target === input) {
+            return;
+        }
+        if (state.pdf.loading || state.pdf.exporting) {
+            showToast("PDF 正在处理，请稍候", "warning");
+            return;
+        }
+        input.click();
+    });
+    dropzone.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            dropzone.click();
+        }
+    });
+    input.addEventListener("change", () => {
+        const file = input.files && input.files[0];
+        input.value = "";
+        if (file) {
+            loadPdfForEditing(file);
+        }
+    });
+    ["dragenter", "dragover"].forEach((name) => {
+        dropzone.addEventListener(name, (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!state.pdf.loading && !state.pdf.exporting) {
+                dropzone.classList.add("dragover");
+            }
+        });
+    });
+    ["dragleave", "drop"].forEach((name) => {
+        dropzone.addEventListener(name, (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            dropzone.classList.remove("dragover");
+        });
+    });
+    dropzone.addEventListener("drop", (event) => {
+        if (state.pdf.loading || state.pdf.exporting) {
+            return;
+        }
+        const files = event.dataTransfer && event.dataTransfer.files
+            ? Array.from(event.dataTransfer.files)
+            : [];
+        if (files.length > 1) {
+            showToast("页面编辑一次加载一个 PDF；合并请用右侧的合并面板", "info");
+            return;
+        }
+        if (files[0]) {
+            loadPdfForEditing(files[0]);
+        }
+    });
+
+    $("pdf-remove").addEventListener("click", clearPdfFile);
+    $("pdf-select-all").addEventListener("click", selectAllPdfPages);
+    $("pdf-invert").addEventListener("click", invertPdfSelection);
+    $("pdf-rotate-selected").addEventListener("click", rotateSelectedPdfPages);
+    $("pdf-delete-selected").addEventListener("click", deleteSelectedPdfPages);
+    $("pdf-reset-order").addEventListener("click", resetPdfOrder);
+    $("pdf-export").addEventListener("click", exportPdfOps);
+    $("pdf-jpg-btn").addEventListener("click", exportPdfJpg);
+
+    const grid = $("pdf-grid");
+    grid.addEventListener("change", (event) => {
+        const checkbox = event.target.closest('[data-action="toggle-page"]');
+        if (!checkbox) {
+            return;
+        }
+        togglePdfSelection(Number(checkbox.dataset.index), checkbox.checked);
+    });
+    grid.addEventListener("click", (event) => {
+        const button = event.target.closest("[data-action]");
+        if (!button || button.tagName === "INPUT") {
+            return;
+        }
+        const index = Number(button.dataset.index);
+        if (button.dataset.action === "rotate-page") {
+            rotatePdfPage(index);
+        } else if (button.dataset.action === "delete-page") {
+            deletePdfPage(index);
+        }
+    });
+    grid.addEventListener("dragstart", (event) => {
+        const card = event.target.closest(".pdf-page-card");
+        if (!card) {
+            return;
+        }
+        const index = Number(card.dataset.index);
+        if (!state.pdf.selected.has(index)) {
+            event.preventDefault();
+            return;
+        }
+        state.pdf.dragIndex = index;
+        card.classList.add("is-dragging");
+        if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData("text/plain", String(index));
+        }
+    });
+    grid.addEventListener("dragend", (event) => {
+        const card = event.target.closest(".pdf-page-card");
+        if (card) {
+            card.classList.remove("is-dragging");
+        }
+        state.pdf.dragIndex = null;
+    });
+    grid.addEventListener("dragover", (event) => {
+        if (state.pdf.dragIndex === null) {
+            return;
+        }
+        const card = event.target.closest(".pdf-page-card");
+        if (card) {
+            event.preventDefault();
+            if (event.dataTransfer) {
+                event.dataTransfer.dropEffect = "move";
+            }
+        }
+    });
+    grid.addEventListener("drop", (event) => {
+        if (state.pdf.dragIndex === null) {
+            return;
+        }
+        const card = event.target.closest(".pdf-page-card");
+        if (!card) {
+            return;
+        }
+        event.preventDefault();
+        const targetIndex = Number(card.dataset.index);
+        const dragIndex = state.pdf.dragIndex;
+        state.pdf.dragIndex = null;
+        reorderPdfPages(dragIndex, targetIndex);
+    });
+
+    $("merge-pick").addEventListener("click", () => {
+        if (!state.pdf.mergeBusy) {
+            $("merge-file-input").click();
+        }
+    });
+    $("merge-file-input").addEventListener("change", (event) => {
+        const files = event.target.files ? Array.from(event.target.files) : [];
+        event.target.value = "";
+        addMergeFiles(files);
+    });
+    $("merge-list").addEventListener("click", (event) => {
+        const button = event.target.closest('[data-action="remove-merge-file"]');
+        if (!button || state.pdf.mergeBusy) {
+            return;
+        }
+        removeMergeFile(Number(button.dataset.id));
+    });
+    $("merge-mode").addEventListener("change", updateMergeUi);
+    $("merge-btn").addEventListener("click", startMerge);
+
+    ["compress-result-list", "pdf-result-list", "merge-result-list", "jpg-result-list"].forEach((id) => {
+        $(id).addEventListener("click", (event) => {
+            const button = event.target.closest('[data-action="copy-error"]');
+            if (!button) {
+                return;
+            }
+            const card = button.closest(".result-card");
+            const notes = card ? Array.from(card.querySelectorAll(".result-note")) : [];
+            const text = notes.map((node) => node.textContent || "").join("\n").trim();
+            if (text) {
+                copyText(text);
+            }
+        });
     });
 }
 
@@ -1681,6 +2986,8 @@ function bindEvents() {
     });
 
     bindBatchEvents();
+    bindCompressEvents();
+    bindPdfEvents();
 }
 
 document.addEventListener("DOMContentLoaded", () => {

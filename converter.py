@@ -30,6 +30,14 @@ _APP_CACHE: dict[str, tuple[float, bool]] = {}
 _APP_CACHE_LOCK = threading.Lock()
 MAX_PDF_ROWS = 3000
 MAX_PDF_COLS = 30
+COMPRESS_LEVELS = {
+    "80": {"dpi": 150, "quality": 85, "max_edge": 2400},
+    "60": {"dpi": 120, "quality": 75, "max_edge": 1920},
+    "40": {"dpi": 100, "quality": 65, "max_edge": 1600},
+    "20": {"dpi": 80, "quality": 50, "max_edge": 1280},
+}
+COMPRESS_UNSUPPORTED = "该格式不支持压缩，本版只支持 PDF 和图片"
+COMPRESS_TEXT_LAYER_NOTE = "压缩后文字已转为图片，不可再搜索或复制"
 OFFICE_EXES = {
     "word": "WINWORD.EXE",
     "excel": "EXCEL.EXE",
@@ -1303,3 +1311,247 @@ def pptx_to_png(src: Path, dst_dir: Path, target: str) -> tuple[Path, str]:
     out = dst_dir / f"{src.stem}.zip"
     _office_convert("powerpoint_png", src, out)
     return out, "已导出全部幻灯片为 PNG，并打包为 ZIP"
+
+
+# ---------------------------------------------------------------------------
+# 压缩（仅 PDF 与图片）
+# ---------------------------------------------------------------------------
+
+def _compress_spec(level: str) -> dict:
+    spec = COMPRESS_LEVELS.get(str(level).strip())
+    if spec is None:
+        raise ConversionError("压缩档位无效，只支持 80 / 60 / 40 / 20")
+    return spec
+
+
+def _report(progress: ProgressCallback | None, percent: int, message: str) -> None:
+    if progress is not None:
+        progress(max(5, min(95, int(percent))), message)
+
+
+def _size_text(size: int) -> str:
+    if size >= 1024 * 1024:
+        return f"{size / 1024 / 1024:.1f} MB"
+    return f"{max(1, round(size / 1024))} KB"
+
+
+def _compress_note(original: Path, output: Path, prefix: str) -> str:
+    before = original.stat().st_size
+    after = output.stat().st_size
+    if before <= 0:
+        return prefix
+    ratio = after / before * 100
+    extra = ""
+    if after >= before:
+        extra = "；原文件以文字或小尺寸图片为主，重渲染后体积可能变大"
+    return f"{prefix}；{_size_text(before)} → {_size_text(after)}（{ratio:.0f}%）{extra}"
+
+
+def _pdf_page_jpeg(page, dpi: int, quality: int) -> bytes:
+    import fitz
+
+    zoom = dpi / 72
+    pix = page.get_pixmap(
+        matrix=fitz.Matrix(zoom, zoom),
+        colorspace=fitz.csRGB,
+        alpha=False,
+    )
+    return pix.tobytes("jpeg", jpg_quality=quality)
+
+
+def _compress_pdf(
+    src: Path,
+    dst_dir: Path,
+    level: str,
+    spec: dict,
+    progress: ProgressCallback | None,
+) -> tuple[Path, str]:
+    import fitz
+
+    doc = _open_pdf(src)
+    output = None
+    try:
+        total = doc.page_count
+        output = fitz.open()
+        for index, page in enumerate(doc, start=1):
+            rect = page.rect
+            data = _pdf_page_jpeg(page, spec["dpi"], spec["quality"])
+            new_page = output.new_page(width=rect.width, height=rect.height)
+            new_page.insert_image(new_page.rect, stream=data)
+            _report(progress, 5 + int(index / max(1, total) * 85), f"正在压缩第 {index}/{total} 页")
+
+        out = dst_dir / f"{src.stem}_compressed.pdf"
+        output.save(str(out), garbage=3, deflate=True)
+    finally:
+        if output is not None:
+            output.close()
+        doc.close()
+
+    prefix = f"档位 {level}：{COMPRESS_TEXT_LAYER_NOTE}"
+    return out, _compress_note(src, out, prefix)
+
+
+def _resize_image(image, max_edge: int):
+    from PIL import Image
+
+    width, height = image.size
+    longest = max(width, height)
+    if longest <= max_edge:
+        return image.copy()
+    scale = max_edge / longest
+    return image.resize(
+        (max(1, round(width * scale)), max(1, round(height * scale))),
+        Image.LANCZOS,
+    )
+
+
+def _save_compressed_image(image, destination, ext: str, quality: int) -> None:
+    from PIL import Image
+
+    if ext in {"jpg", "jpeg"}:
+        rgba = image.convert("RGBA")
+        background = Image.new("RGB", rgba.size, "white")
+        background.paste(rgba, mask=rgba.split()[-1])
+        background.save(destination, "JPEG", quality=quality, optimize=True)
+        background.close()
+        rgba.close()
+        return
+    if ext == "png":
+        converted = image.copy()
+        converted.save(destination, "PNG", optimize=True)
+        converted.close()
+        return
+    if ext == "webp":
+        converted = image.convert("RGBA") if image.mode in {"RGBA", "LA", "P"} else image.convert("RGB")
+        converted.save(destination, "WEBP", quality=quality, method=6)
+        converted.close()
+        return
+    if ext == "tiff":
+        converted = image.convert("RGB")
+        converted.save(destination, "TIFF", compression="tiff_deflate")
+        converted.close()
+        return
+    if ext == "gif":
+        converted = image.convert("P", palette=Image.ADAPTIVE)
+        converted.save(destination, "GIF", optimize=True)
+        converted.close()
+        return
+    if ext == "bmp":
+        converted = image.convert("RGB")
+        converted.save(destination, "BMP")
+        converted.close()
+        return
+    raise ConversionError(COMPRESS_UNSUPPORTED)
+
+
+def _compress_image(
+    src: Path,
+    dst_dir: Path,
+    level: str,
+    spec: dict,
+    progress: ProgressCallback | None,
+) -> tuple[Path, str]:
+    try:
+        from PIL import Image, ImageOps
+    except ImportError as exc:
+        raise ConversionError("缺少 Pillow，请重新安装依赖") from exc
+
+    ext = src.suffix.lower().lstrip(".")
+    image = None
+    resized = None
+    try:
+        image = Image.open(src)
+        frames = getattr(image, "n_frames", 1)
+        image.seek(0)
+        image = ImageOps.exif_transpose(image)
+        width, height = image.size
+        _report(progress, 20, "正在缩放图片")
+        resized = _resize_image(image, spec["max_edge"])
+        new_width, new_height = resized.size
+        out = dst_dir / f"{src.stem}_compressed.{ext}"
+        _save_compressed_image(resized, out, ext, spec["quality"])
+        _report(progress, 90, "正在写入压缩结果")
+    finally:
+        if resized is not None:
+            resized.close()
+        if image is not None:
+            image.close()
+
+    detail = f"档位 {level}：最长边 {max(width, height)} → {max(new_width, new_height)} 像素"
+    if ext in {"jpg", "jpeg", "webp"}:
+        detail = f"{detail}，quality {spec['quality']}"
+    elif ext == "png":
+        detail = f"{detail}，PNG 使用无损优化"
+    if frames > 1:
+        detail = f"检测到多帧图片，仅处理第一帧；{detail}"
+    return out, _compress_note(src, out, detail)
+
+
+def compress_file(
+    src: Path,
+    dst_dir: Path,
+    level: str,
+    progress: ProgressCallback | None = None,
+) -> tuple[Path, str]:
+    """按 80/60/40/20 四档压缩 PDF 或图片。"""
+    src = Path(src)
+    dst_dir = Path(dst_dir)
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    ext = src.suffix.lower().lstrip(".")
+    spec = _compress_spec(level)
+    if ext == "pdf":
+        return _compress_pdf(src, dst_dir, str(level).strip(), spec, progress)
+    if ext in IMAGE_EXTS:
+        return _compress_image(src, dst_dir, str(level).strip(), spec, progress)
+    raise ConversionError(COMPRESS_UNSUPPORTED)
+
+
+def estimate_compression(src: Path) -> dict:
+    """抽样估算四档压缩大小：PDF 取前 3 页，图片直接计算 1 张。"""
+    src = Path(src)
+    ext = src.suffix.lower().lstrip(".")
+    original = src.stat().st_size
+
+    if ext == "pdf":
+        doc = _open_pdf(src)
+        try:
+            total = doc.page_count
+            sample = min(3, total)
+            levels: dict[str, int] = {}
+            for level, spec in COMPRESS_LEVELS.items():
+                sample_bytes = sum(
+                    len(_pdf_page_jpeg(doc[index], spec["dpi"], spec["quality"]))
+                    for index in range(sample)
+                )
+                levels[level] = max(1, round(sample_bytes / sample * total))
+        finally:
+            doc.close()
+        return {"original_size": original, "levels": levels, "sampled_pages": sample}
+
+    if ext in IMAGE_EXTS:
+        try:
+            from PIL import Image, ImageOps
+        except ImportError as exc:
+            raise ConversionError("缺少 Pillow，请重新安装依赖") from exc
+
+        image = None
+        try:
+            image = Image.open(src)
+            image.seek(0)
+            image = ImageOps.exif_transpose(image)
+            levels = {}
+            for level, spec in COMPRESS_LEVELS.items():
+                resized = _resize_image(image, spec["max_edge"])
+                buffer = io.BytesIO()
+                try:
+                    _save_compressed_image(resized, buffer, ext, spec["quality"])
+                    levels[level] = max(1, buffer.tell())
+                finally:
+                    resized.close()
+                    buffer.close()
+        finally:
+            if image is not None:
+                image.close()
+        return {"original_size": original, "levels": levels, "sampled_pages": 1}
+
+    raise ConversionError(COMPRESS_UNSUPPORTED)

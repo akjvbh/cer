@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import io
 import json
 import os
@@ -203,6 +204,77 @@ def submit_and_wait(filename: str, content: bytes, target: str) -> tuple[dict, d
     return payload, result, content_bytes
 
 
+def multipart_named(
+    fields: dict[str, str],
+    files: list[tuple[str, bytes, str]],
+    field_name: str = "files",
+) -> tuple[bytes, str]:
+    boundary = "----smokenamed" + uuid.uuid4().hex
+    chunks: list[bytes] = []
+    for name, value in fields.items():
+        chunks.append(
+            f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'.encode(
+                "utf-8"
+            )
+        )
+    for filename, content, content_type in files:
+        chunks.append(
+            (
+                f'--{boundary}\r\nContent-Disposition: form-data; name="{field_name}"; '
+                f'filename="{filename}"\r\nContent-Type: {content_type}\r\n\r\n'
+            ).encode("utf-8")
+        )
+        chunks.append(content)
+        chunks.append(b"\r\n")
+    chunks.append(f"--{boundary}--\r\n".encode("utf-8"))
+    return b"".join(chunks), f"multipart/form-data; boundary={boundary}"
+
+
+def post_task(
+    path: str,
+    fields: dict[str, str],
+    files: list[tuple[str, bytes, str]],
+    field_name: str = "files",
+) -> str:
+    body, content_type = multipart_named(fields, files, field_name)
+    status, _, response = http_request(
+        "POST",
+        path,
+        data=body,
+        headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+    )
+    if status != 200:
+        raise AssertionError(f"{path} 提交失败 HTTP {status}: {response.decode('utf-8', 'replace')}")
+    return json.loads(response.decode("utf-8"))["task_id"]
+
+
+def wait_task_error(task_id: str, timeout: int = 120) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        status, payload, _ = json_request("GET", f"/api/tasks/{task_id}")
+        if status != 200:
+            raise AssertionError(f"轮询失败 HTTP {status}: {payload}")
+        if payload["status"] == "error":
+            return payload
+        if payload["status"] == "done":
+            raise AssertionError("任务本应失败，但返回了成功")
+        time.sleep(0.2)
+    raise AssertionError("错误任务在 120 秒内没有结束")
+
+
+def make_pdf(path: Path, texts: list[str], rotation: int = 0) -> None:
+    document = fitz.open()
+    try:
+        for text in texts:
+            page = document.new_page()
+            page.insert_text((72, 72), text, fontsize=14)
+        if rotation:
+            document[0].set_rotation(rotation)
+        document.save(str(path))
+    finally:
+        document.close()
+
+
 def check(name: str, condition: bool, detail: str = "") -> None:
     if condition:
         PASSED.append(name)
@@ -241,6 +313,42 @@ def make_samples(directory: Path) -> dict[str, Path]:
         page.insert_text((72, 72), text, fontsize=14)
     pdf.save(str(pdf_path))
     pdf.close()
+
+    rotated_path = directory / "rotated.pdf"
+    make_pdf(rotated_path, ["rotated page one", "rotated page two"], rotation=90)
+
+    encrypted_path = directory / "encrypted.pdf"
+    encrypted = fitz.open()
+    try:
+        encrypted.new_page().insert_text((72, 72), "secret", fontsize=14)
+        encrypted.save(
+            str(encrypted_path),
+            encryption=fitz.PDF_ENCRYPT_AES_256,
+            owner_pw="owner",
+            user_pw="secret",
+        )
+    finally:
+        encrypted.close()
+
+    letters_a = directory / "letters_a.pdf"
+    make_pdf(letters_a, ["A1", "A2"])
+    letters_b = directory / "letters_b.pdf"
+    make_pdf(letters_b, ["B1", "B2"])
+    pages3_path = directory / "pages3.pdf"
+    make_pdf(pages3_path, ["P1", "P2", "P3"])
+
+    noise_path = directory / "noise.png"
+    noise = Image.effect_noise((900, 700), 120).convert("RGB")
+    noise.save(str(noise_path), "PNG")
+    noise.close()
+    noisy_pdf_path = directory / "noisy.pdf"
+    noisy = fitz.open()
+    try:
+        page = noisy.new_page()
+        page.insert_image(page.rect, filename=str(noise_path))
+        noisy.save(str(noisy_pdf_path))
+    finally:
+        noisy.close()
 
     image_path = directory / "smoke.png"
     image = Image.new("RGB", (480, 320), "white")
@@ -298,6 +406,12 @@ def make_samples(directory: Path) -> dict[str, Path]:
     return {
         "docx": docx_path,
         "pdf": pdf_path,
+        "rotated": rotated_path,
+        "encrypted": encrypted_path,
+        "letters_a": letters_a,
+        "letters_b": letters_b,
+        "pages3": pages3_path,
+        "noisy": noisy_pdf_path,
         "png": image_path,
         "md": md_path,
         "txt": txt_path,
@@ -368,7 +482,7 @@ def main() -> int:
             assert payload.get("office") is False
             assert payload.get("excel") is False
             assert payload.get("powerpoint") is False
-            assert payload.get("version") == "0.2.0"
+            assert payload.get("version") == "0.3.0"
             head_status, _, _ = http_request("HEAD", "/api/health")
             assert head_status == 200
 
@@ -405,11 +519,15 @@ def main() -> int:
             assert status == 200
             assert "格式转换" in text and "拖拽文件" in text
             assert "批量处理" in text and "batch-dropzone" in text
+            assert "compress-confirm-dialog" in text and "pdf-grid" in text
+            assert "merge-mode" in text and "pdf-jpg-btn" in text
             assert "app.js" in text and "app.css" in text
             status, _, css = http_request("GET", "/static/app.css")
             assert status == 200 and len(css) > 1000
             status, _, js = http_request("GET", "/static/app.js")
             assert status == 200 and len(js) > 1000
+            script = js.decode("utf-8")
+            assert "askCompressConfirm" in script and "window.confirm" not in script
 
         run("首页与静态资源", test_homepage)
 
@@ -797,6 +915,277 @@ def main() -> int:
             assert "200" in body.decode("utf-8")
 
         run("批量参数与数量上限校验", test_batch_validation)
+
+        def test_pdf_preview():
+            body, content_type = multipart(
+                {"limit": "1"},
+                {"file": ("smoke.pdf", samples["pdf"].read_bytes(), "application/pdf")},
+            )
+            status, _, response = http_request(
+                "POST",
+                "/api/pdf/preview",
+                data=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            assert status == 200
+            data = json.loads(response.decode("utf-8"))
+            assert len(data["pages"]) == 1
+            assert data["truncated"] is True
+            page = data["pages"][0]
+            assert page["index"] == 1
+            assert page["width"] == 595 and page["height"] == 842
+            assert page["rotation"] == 0
+            assert base64.b64decode(page["png_base64"]).startswith(b"\x89PNG\r\n\x1a\n")
+
+        run("PDF 预览（前 N 页 + PNG base64）", test_pdf_preview)
+
+        def test_pdf_preview_rotation():
+            body, content_type = multipart(
+                {"limit": "50"},
+                {"file": ("rotated.pdf", samples["rotated"].read_bytes(), "application/pdf")},
+            )
+            status, _, response = http_request(
+                "POST",
+                "/api/pdf/preview",
+                data=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            assert status == 200
+            data = json.loads(response.decode("utf-8"))
+            assert data["truncated"] is False
+            assert data["pages"][0]["rotation"] == 90
+            assert data["pages"][0]["width"] == 595
+
+        run("PDF 预览保留原 rotation", test_pdf_preview_rotation)
+
+        def test_pdf_encrypted_rejected():
+            body, content_type = multipart(
+                {"limit": "10"},
+                {"file": ("encrypted.pdf", samples["encrypted"].read_bytes(), "application/pdf")},
+            )
+            status, _, response = http_request(
+                "POST",
+                "/api/pdf/preview",
+                data=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            assert status == 400
+            assert "不支持加密" in response.decode("utf-8")
+
+        run("加密 PDF 返回 400", test_pdf_encrypted_rejected)
+
+        def read_pdf(content: bytes):
+            document = fitz.open(stream=content, filetype="pdf")
+            try:
+                return document.page_count, [page.get_text().strip() for page in document], [
+                    page.rotation for page in document
+                ]
+            finally:
+                document.close()
+
+        def test_pdf_ops_delete_rotate():
+            task_id = post_task(
+                "/api/pdf/ops",
+                {"delete_pages": "[2]", "rotations": '{"1": 90}'},
+                [("smoke.pdf", samples["pdf"].read_bytes(), "application/pdf")],
+                field_name="file",
+            )
+            payload = poll_task(task_id)
+            assert "删除 1 页" in payload["result"]["note"]
+            assert "旋转 1 页" in payload["result"]["note"]
+            status, _, content = http_request("GET", payload["result"]["download_url"])
+            assert status == 200
+            count, texts, rotations = read_pdf(content)
+            assert count == 1
+            assert "PDF smoke page one" in texts[0]
+            assert rotations == [90]
+
+        run("PDF 删页 + 旋转（1-based 原页码）", test_pdf_ops_delete_rotate)
+
+        def test_pdf_ops_preserve_rotation():
+            task_id = post_task(
+                "/api/pdf/ops",
+                {"delete_pages": "[2]"},
+                [("rotated.pdf", samples["rotated"].read_bytes(), "application/pdf")],
+                field_name="file",
+            )
+            payload = poll_task(task_id)
+            status, _, content = http_request("GET", payload["result"]["download_url"])
+            assert status == 200
+            count, _, rotations = read_pdf(content)
+            assert count == 1
+            assert rotations == [90], "未指定旋转时应保留原 rotation"
+
+        run("PDF 删页时保留原 rotation", test_pdf_ops_preserve_rotation)
+
+        def test_pdf_ops_page_order_duplicates():
+            task_id = post_task(
+                "/api/pdf/ops",
+                {"page_order": "[3, 1, 1]"},
+                [("pages3.pdf", samples["pages3"].read_bytes(), "application/pdf")],
+                field_name="file",
+            )
+            payload = poll_task(task_id)
+            status, _, content = http_request("GET", payload["result"]["download_url"])
+            assert status == 200
+            count, texts, _ = read_pdf(content)
+            assert count == 3
+            assert texts == ["P3", "P1", "P1"]
+
+        run("PDF page_order 白名单允许重复页", test_pdf_ops_page_order_duplicates)
+
+        def test_pdf_ops_errors():
+            task_id = post_task(
+                "/api/pdf/ops",
+                {"delete_pages": "[99]"},
+                [("pages3.pdf", samples["pages3"].read_bytes(), "application/pdf")],
+                field_name="file",
+            )
+            payload = wait_task_error(task_id)
+            assert "第 99 页" in payload["error"] and "3 页" in payload["error"]
+
+            body, content_type = multipart(
+                {},
+                {"file": ("pages3.pdf", samples["pages3"].read_bytes(), "application/pdf")},
+            )
+            status, _, response = http_request(
+                "POST",
+                "/api/pdf/ops",
+                data=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            assert status == 400
+            assert "至少指定" in response.decode("utf-8")
+
+        run("PDF 页面操作越界与空参数报错", test_pdf_ops_errors)
+
+        def test_pdf_merge_modes():
+            files = [
+                ("letters_a.pdf", samples["letters_a"].read_bytes(), "application/pdf"),
+                ("letters_b.pdf", samples["letters_b"].read_bytes(), "application/pdf"),
+            ]
+            expected = {
+                "append": ["A1", "A2", "B1", "B2"],
+                "interleave": ["A1", "B1", "A2", "B2"],
+                "insert": ["A1", "B1", "B2", "A2"],
+            }
+            for mode, order in expected.items():
+                task_id = post_task(
+                    "/api/pdf/merge",
+                    {"mode": mode, "insert_index": "1"},
+                    files,
+                )
+                payload = poll_task(task_id)
+                assert "共合并 2 个文件、4 页" in payload["result"]["note"]
+                status, _, content = http_request("GET", payload["result"]["download_url"])
+                assert status == 200
+                count, texts, _ = read_pdf(content)
+                assert count == 4
+                assert texts == order, f"{mode} 页序错误：{texts}"
+
+        run("PDF 合并 append / interleave / insert", test_pdf_merge_modes)
+
+        def test_compress_estimate():
+            body, content_type = multipart(
+                {},
+                {"file": ("smoke.pdf", samples["pdf"].read_bytes(), "application/pdf")},
+            )
+            status, _, response = http_request(
+                "POST",
+                "/api/compress/estimate",
+                data=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            assert status == 200
+            data = json.loads(response.decode("utf-8"))
+            assert data["original_size"] == samples["pdf"].stat().st_size
+            assert set(data["levels"]) == {"80", "60", "40", "20"}
+            assert data["sampled_pages"] == 2
+
+        run("PDF 压缩四档预估", test_compress_estimate)
+
+        def test_compress_pdf():
+            task_id = post_task(
+                "/api/compress",
+                {"level": "20"},
+                [("smoke.pdf", samples["pdf"].read_bytes(), "application/pdf")],
+                field_name="file",
+            )
+            payload = poll_task(task_id)
+            result = payload["result"]
+            assert "不可再搜索" in result["note"]
+            status, _, content = http_request("GET", result["download_url"])
+            assert status == 200 and content.startswith(b"%PDF")
+            count, texts, _ = read_pdf(content)
+            assert count == 2
+            assert all(not text for text in texts), "压缩后不应保留文字层"
+
+        run("PDF 压缩（文字层丢失提示）", test_compress_pdf)
+
+        def test_compress_image():
+            task_id = post_task(
+                "/api/compress",
+                {"level": "20"},
+                [("smoke.png", samples["png"].read_bytes(), "image/png")],
+                field_name="file",
+            )
+            payload = poll_task(task_id)
+            status, _, content = http_request("GET", payload["result"]["download_url"])
+            assert status == 200 and content.startswith(b"\x89PNG")
+            assert len(content) < len(samples["png"].read_bytes())
+            assert payload["result"]["filename"] == "smoke_压缩.png"
+
+        run("图片压缩（20 档）", test_compress_image)
+
+        def test_compress_unsupported():
+            body, content_type = multipart(
+                {"level": "60"},
+                {"file": ("smoke.md", samples["md"].read_bytes(), "text/markdown")},
+            )
+            status, _, response = http_request(
+                "POST",
+                "/api/compress",
+                data=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            assert status == 400
+            payload = json.loads(response.decode("utf-8"))
+            assert payload["error"] == "该格式不支持压缩，本版只支持 PDF 和图片"
+
+        run("非 PDF/图片压缩返回 400", test_compress_unsupported)
+
+        def test_pdf_to_jpg_limit():
+            task_id = post_task(
+                "/api/pdf/to-jpg",
+                {"max_kb": "300"},
+                [("smoke.pdf", samples["pdf"].read_bytes(), "application/pdf")],
+            )
+            payload = poll_task(task_id)
+            result = payload["result"]
+            assert result["success_files"] == 1 and result["failed_files"] == 0
+            assert "每张不超过 300KB" in result["note"]
+            status, _, content = http_request("GET", result["download_url"])
+            assert status == 200
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                names = [name for name in archive.namelist() if name.endswith(".jpg")]
+                assert len(names) == 2
+                for name in names:
+                    data = archive.read(name)
+                    assert data.startswith(b"\xff\xd8\xff")
+                    assert len(data) <= 300 * 1024
+
+        run("PDF 逐页 JPG ≤300KB", test_pdf_to_jpg_limit)
+
+        def test_pdf_to_jpg_too_small_limit():
+            task_id = post_task(
+                "/api/pdf/to-jpg",
+                {"max_kb": "10"},
+                [("noisy.pdf", samples["noisy"].read_bytes(), "application/pdf")],
+            )
+            payload = wait_task_error(task_id)
+            assert "无法压到 10KB 以内" in payload["error"]
+
+        run("JPG 上限无法达成时明确报错", test_pdf_to_jpg_too_small_limit)
 
     finally:
         if process.poll() is None:

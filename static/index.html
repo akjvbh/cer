@@ -74,7 +74,7 @@
                         </svg>
                     </span>
                     <span class="nav-text">压缩</span>
-                    <span class="nav-badge">阶段 3</span>
+                    <span class="nav-badge ready">可用</span>
                 </button>
                 <button class="nav-item" type="button" data-page="pdf">
                     <span class="nav-icon" aria-hidden="true">
@@ -85,7 +85,7 @@
                         </svg>
                     </span>
                     <span class="nav-text">PDF 工具</span>
-                    <span class="nav-badge">阶段 3</span>
+                    <span class="nav-badge ready">可用</span>
                 </button>
                 <button class="nav-item" type="button" data-page="ai">
                     <span class="nav-icon" aria-hidden="true">
@@ -327,19 +327,130 @@
                     <div>
                         <p class="eyebrow">COMPRESSION</p>
                         <h1>在清晰度和体积之间取舍</h1>
-                        <p class="page-lead">四档压缩、压缩前预估，并明确提示 PDF 压缩会丢失文字层。</p>
+                        <p class="page-lead">四档压缩、压缩前预估。本版只支持 PDF 和图片；PDF 会重渲染为图片，文字层会丢失。</p>
                     </div>
                     <div class="heading-mark" aria-hidden="true">03</div>
                 </div>
-                <div class="coming-card">
-                    <span class="coming-tag">阶段 3 · 即将上线</span>
-                    <h2>四档压缩与体积预估</h2>
-                    <p>PDF 与图片压缩会在阶段 3 接入。PDF 会重渲染为图片，压缩后文字不可再搜索，界面会先弹确认框。</p>
-                    <ul class="feature-list">
-                        <li>80 / 60 / 40 / 20 四档质量</li>
-                        <li>抽样前三页预估大小，不跑整份文件</li>
-                        <li>压缩结果卡片固定注明「丢文字层」</li>
-                    </ul>
+
+                <div class="workspace">
+                    <section class="panel upload-panel">
+                        <div class="panel-head">
+                            <h2>上传文件</h2>
+                            <span class="panel-tag">PDF / 图片</span>
+                        </div>
+
+                        <div class="dropzone" id="compress-dropzone" role="button" tabindex="0" aria-label="选择或拖入要压缩的 PDF 或图片">
+                            <div class="dropzone-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M12 16V4M7.5 8.5 12 4l4.5 4.5"></path>
+                                    <path d="M4 15.5V19h16v-3.5"></path>
+                                </svg>
+                            </div>
+                            <p class="dropzone-title">拖入 PDF 或图片，或点击选择</p>
+                            <p class="dropzone-sub" id="compress-dropzone-sub">只支持 PDF 与图片；docx / xlsx / pptx 不压缩</p>
+                            <input type="file" id="compress-file-input" accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.gif,.tiff" hidden>
+                        </div>
+
+                        <div class="selected-file" id="compress-selected" hidden>
+                            <div class="file-icon" id="compress-file-icon">PDF</div>
+                            <div class="file-meta">
+                                <p class="file-name" id="compress-file-name"></p>
+                                <p class="file-size" id="compress-file-size"></p>
+                            </div>
+                            <button class="ghost-button" type="button" id="compress-remove">移除</button>
+                        </div>
+
+                        <div class="form-row">
+                            <label>压缩档位</label>
+                            <div class="level-grid" id="compress-levels" role="group" aria-label="选择压缩档位">
+                                <button class="level-card" type="button" data-level="80">
+                                    <span class="level-value">80</span>
+                                    <strong>高质量</strong>
+                                    <em>150 DPI · q85</em>
+                                </button>
+                                <button class="level-card is-active" type="button" data-level="60">
+                                    <span class="level-value">60</span>
+                                    <strong>推荐</strong>
+                                    <em>120 DPI · q75</em>
+                                </button>
+                                <button class="level-card" type="button" data-level="40">
+                                    <span class="level-value">40</span>
+                                    <strong>小体积</strong>
+                                    <em>100 DPI · q65</em>
+                                </button>
+                                <button class="level-card" type="button" data-level="20">
+                                    <span class="level-value">20</span>
+                                    <strong>最小</strong>
+                                    <em>80 DPI · q50</em>
+                                </button>
+                            </div>
+                            <p class="form-hint" id="compress-level-hint">图片档位按最长边 2400 / 1920 / 1600 / 1280 像素限制。</p>
+                        </div>
+
+                        <p class="office-warning" id="compress-warning" hidden>
+                            PDF 压缩会把每页重渲染为图片，文字层会丢失，压缩后不可再搜索或复制。
+                        </p>
+
+                        <button class="primary-button" type="button" id="compress-btn" disabled>
+                            <span id="compress-btn-text">开始压缩</span>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M5 12h14M14 7l5 5-5 5"></path>
+                            </svg>
+                        </button>
+                    </section>
+
+                    <section class="panel result-panel">
+                        <div class="panel-head">
+                            <h2>压缩结果</h2>
+                            <span class="panel-tag" id="compress-result-tag">0 个</span>
+                        </div>
+
+                        <div class="estimate-card" id="compress-estimate" hidden>
+                            <div class="estimate-head">
+                                <strong>体积预估</strong>
+                                <span id="estimate-note">抽样估算</span>
+                            </div>
+                            <div class="estimate-rows" id="estimate-rows"></div>
+                        </div>
+
+                        <div class="progress-card" id="compress-progress" hidden aria-live="polite">
+                            <div class="progress-top">
+                                <span id="compress-progress-message">正在上传</span>
+                                <strong id="compress-progress-percent">0%</strong>
+                            </div>
+                            <div class="progress-track">
+                                <div class="progress-bar" id="compress-progress-bar"></div>
+                            </div>
+                            <p class="progress-note">PDF 压缩按页重渲染；页数越多耗时越长。</p>
+                        </div>
+
+                        <div class="result-list" id="compress-result-list"></div>
+
+                        <div class="empty-state" id="compress-empty">
+                            <div class="empty-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"></path>
+                                </svg>
+                            </div>
+                            <p>压缩结果会出现在这里</p>
+                            <span>选择文件后会先显示四档体积预估。</span>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="tip-strip">
+                    <div class="tip-item">
+                        <span class="tip-number">01</span>
+                        <div><strong>只压 PDF 与图片</strong><p>其它格式直接提示不支持，不返回原文件冒充成功。</p></div>
+                    </div>
+                    <div class="tip-item">
+                        <span class="tip-number">02</span>
+                        <div><strong>先估算再压缩</strong><p>PDF 抽样前 3 页估算，不会为了预估跑完整份文件。</p></div>
+                    </div>
+                    <div class="tip-item">
+                        <span class="tip-number">03</span>
+                        <div><strong>文字层提示</strong><p>PDF 压缩提交前确认，结果卡片再次说明不可搜索。</p></div>
+                    </div>
                 </div>
             </section>
 
@@ -348,19 +459,163 @@
                     <div>
                         <p class="eyebrow">PDF TOOLKIT</p>
                         <h1>合并、删页、旋转、导出</h1>
-                        <p class="page-lead">页码始终按原文件计算，页面操作全部进入同一个撤销栈。</p>
+                        <p class="page-lead">页码始终按原文件计算；旋转提交的是最终角度。所有文件都在本机处理。</p>
                     </div>
                     <div class="heading-mark" aria-hidden="true">04</div>
                 </div>
-                <div class="coming-card">
-                    <span class="coming-tag">阶段 3 · 即将上线</span>
-                    <h2>可视化 PDF 页面编辑器</h2>
-                    <p>缩略图网格、拖拽排序、复制页、绝对角度旋转，以及逐页 JPG 打包导出，都会在阶段 3 完成。</p>
-                    <ul class="feature-list">
-                        <li>合并支持首尾相接、逐页交替、插入指定页后</li>
-                        <li>导出 JPG 每张控制在 300KB 以内</li>
-                        <li>Ctrl+Z / Ctrl+Shift+Z 撤销与重做</li>
-                    </ul>
+
+                <div class="pdf-workspace">
+                    <section class="panel pdf-editor-panel">
+                        <div class="panel-head">
+                            <h2>PDF 页面编辑</h2>
+                            <span class="panel-tag" id="pdf-page-tag">未加载</span>
+                        </div>
+
+                        <div class="dropzone pdf-dropzone" id="pdf-dropzone" role="button" tabindex="0" aria-label="选择要编辑的 PDF">
+                            <div class="dropzone-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M6 3.5h8l4 4v13H6z"></path>
+                                    <path d="M14 3.5v4h4"></path>
+                                    <path d="M9 13h6M9 16.5h4"></path>
+                                </svg>
+                            </div>
+                            <p class="dropzone-title">拖入一个 PDF，或点击选择</p>
+                            <p class="dropzone-sub">加载后显示缩略图网格，可勾选、删除、旋转、拖拽排序</p>
+                            <input type="file" id="pdf-file-input" accept=".pdf" hidden>
+                        </div>
+
+                        <div class="selected-file" id="pdf-selected" hidden>
+                            <div class="file-icon kind-pdf">PDF</div>
+                            <div class="file-meta">
+                                <p class="file-name" id="pdf-file-name"></p>
+                                <p class="file-size" id="pdf-file-size"></p>
+                            </div>
+                            <button class="ghost-button" type="button" id="pdf-remove">移除</button>
+                        </div>
+
+                        <div id="pdf-editor" hidden>
+                            <div class="pdf-toolbar">
+                                <p class="pdf-stats" id="pdf-stats">共 0 页，已选 0 页</p>
+                                <div class="pdf-toolbar-actions">
+                                    <button class="mini-button" type="button" id="pdf-select-all">全选</button>
+                                    <button class="mini-button" type="button" id="pdf-invert">反选</button>
+                                    <button class="mini-button" type="button" id="pdf-rotate-selected">顺时针旋转选中</button>
+                                    <button class="mini-button" type="button" id="pdf-delete-selected">删除选中</button>
+                                    <button class="mini-button" type="button" id="pdf-reset-order">恢复原顺序</button>
+                                    <button class="mini-button accent" type="button" id="pdf-export">应用并下载</button>
+                                </div>
+                            </div>
+                            <p class="form-hint">按原文件页码。勾选页面后可拖拽调整顺序；每点一次旋转 +90°，提交的是最终角度。</p>
+                            <div class="pdf-grid" id="pdf-grid"></div>
+                            <p class="office-warning" id="pdf-truncated" hidden>仅显示前 50 页，其余页面保存时原样保留。</p>
+
+                            <div class="progress-card" id="pdf-progress" hidden aria-live="polite">
+                                <div class="progress-top">
+                                    <span id="pdf-progress-message">正在处理</span>
+                                    <strong id="pdf-progress-percent">0%</strong>
+                                </div>
+                                <div class="progress-track">
+                                    <div class="progress-bar" id="pdf-progress-bar"></div>
+                                </div>
+                            </div>
+                            <div class="result-list" id="pdf-result-list"></div>
+                        </div>
+
+                        <div class="empty-state" id="pdf-empty">
+                            <div class="empty-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M6 3.5h8l4 4v13H6z"></path>
+                                    <path d="M14 3.5v4h4"></path>
+                                    <path d="M9 13h6M9 16.5h4"></path>
+                                </svg>
+                            </div>
+                            <p>还没有加载 PDF</p>
+                            <span>加载后可预览页面、删除、旋转、拖拽排序并一次性提交。</span>
+                        </div>
+                    </section>
+
+                    <aside class="pdf-side">
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h2>合并 PDF</h2>
+                                <span class="panel-tag" id="merge-count">0 个</span>
+                            </div>
+                            <p class="panel-copy">按顺序选择至少两个 PDF。合并后页数等于各文件页数之和。</p>
+                            <button class="secondary-button full-button" type="button" id="merge-pick">选择 PDF 文件</button>
+                            <input type="file" id="merge-file-input" accept=".pdf" multiple hidden>
+                            <div class="merge-list" id="merge-list">
+                                <p class="merge-empty">还没有选择 PDF</p>
+                            </div>
+
+                            <div class="form-row">
+                                <label for="merge-mode">合并方式</label>
+                                <div class="select-wrap">
+                                    <select id="merge-mode">
+                                        <option value="append">首尾相接</option>
+                                        <option value="interleave">逐页交替</option>
+                                        <option value="insert">插入到指定位置</option>
+                                    </select>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                        <path d="m7 9 5 5 5-5"></path>
+                                    </svg>
+                                </div>
+                            </div>
+
+                            <div class="form-row" id="merge-insert-row" hidden>
+                                <label for="merge-insert">插入位置</label>
+                                <input class="text-input" type="number" id="merge-insert" min="0" step="1" value="0">
+                                <p class="form-hint">在第 N 页之后插入，0 表示插到第 1 页之前；按第 1 个文件的页码。</p>
+                            </div>
+
+                            <button class="primary-button" type="button" id="merge-btn" disabled>
+                                <span id="merge-btn-text">开始合并</span>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M5 12h14M14 7l5 5-5 5"></path>
+                                </svg>
+                            </button>
+
+                            <div class="progress-card" id="merge-progress" hidden aria-live="polite">
+                                <div class="progress-top">
+                                    <span id="merge-progress-message">正在合并</span>
+                                    <strong id="merge-progress-percent">0%</strong>
+                                </div>
+                                <div class="progress-track">
+                                    <div class="progress-bar" id="merge-progress-bar"></div>
+                                </div>
+                            </div>
+                            <div class="result-list" id="merge-result-list"></div>
+                        </section>
+
+                        <section class="panel">
+                            <div class="panel-head">
+                                <h2>逐页导出 JPG</h2>
+                                <span class="panel-tag">当前 PDF</span>
+                            </div>
+                            <p class="panel-copy">把当前加载的 PDF 逐页导出为 JPG，每张必须小于等于设定上限，达不到会明确报错。</p>
+                            <div class="form-row">
+                                <label for="jpg-max-kb">每张上限（KB）</label>
+                                <input class="text-input" type="number" id="jpg-max-kb" min="10" max="10240" step="10" value="300">
+                            </div>
+                            <button class="primary-button" type="button" id="pdf-jpg-btn" disabled>
+                                <span id="pdf-jpg-btn-text">导出为 JPG</span>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M12 4v11M8 11l4 4 4-4"></path>
+                                    <path d="M5 19h14"></path>
+                                </svg>
+                            </button>
+
+                            <div class="progress-card" id="jpg-progress" hidden aria-live="polite">
+                                <div class="progress-top">
+                                    <span id="jpg-progress-message">正在导出</span>
+                                    <strong id="jpg-progress-percent">0%</strong>
+                                </div>
+                                <div class="progress-track">
+                                    <div class="progress-bar" id="jpg-progress-bar"></div>
+                                </div>
+                            </div>
+                            <div class="result-list" id="jpg-result-list"></div>
+                        </section>
+                    </aside>
                 </div>
             </section>
 
@@ -387,6 +642,15 @@
         </main>
     </div>
 </div>
+
+<dialog class="confirm-dialog" id="compress-confirm-dialog" aria-labelledby="compress-confirm-title">
+    <h2 id="compress-confirm-title">确认压缩 PDF</h2>
+    <p>压缩后文字会变成图片，不可再搜索或复制。原文件不会被修改，但结果 PDF 将失去文字层。</p>
+    <div class="confirm-actions">
+        <button class="secondary-button" type="button" id="compress-confirm-cancel">取消</button>
+        <button class="primary-button confirm-primary" type="button" id="compress-confirm-ok">继续压缩</button>
+    </div>
+</dialog>
 
 <div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="false"></div>
 <script src="/static/app.js"></script>

@@ -7,7 +7,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-Private-lightgrey)
 
-> 当前版本 **0.2.0 / 阶段 2（格式矩阵与批量处理）**：17 种源格式键（含 `jpg`/`jpeg` 别名）、单文件转换、按格式分组的批量转换、失败隔离与重试均已可用；压缩、PDF 工具、AI 增强为后续阶段。
+> 当前版本 **0.3.0 / 阶段 3（压缩与 PDF 工具）**：转换矩阵与批量处理保持可用；新增 PDF / 图片四档压缩、压缩预估、PDF 合并、删页 / 旋转 / 重排 / 复制页、缩略图预览与逐页导出 JPG；AI 增强为后续阶段。
 
 ## 快速开始
 
@@ -65,6 +65,25 @@ py -3.11 -m venv .venv
 
 默认限制：单文件 200MB、单批最多 200 个文件、单批总大小 500MB。超限或不支持的扩展名会在开始前标红并说明原因，不会静默丢弃。
 
+## 压缩
+
+左侧选择「压缩」，只接受 **PDF 与图片**，四档 `80 / 60 / 40 / 20` 对应不同的 DPI、JPEG 质量与最长边限制：
+
+- 选中文件后先显示四档预估体积；PDF 只抽前 3 页估算，不为了预估跑完整份文件。
+- PDF 压缩会把每页重渲染为 JPEG 图片，**文字层会丢失**，提交前会弹出页面内确认框，结果卡片也会再次说明。
+- 图片压缩按最长边等比缩小，JPG 会先铺白底，避免透明区域变黑；动图与多帧 TIFF 只处理首帧并在结果中说明。
+- 纯文字或本身很小的 PDF 重渲染后体积可能**变大**，结果说明会明确提示；原文件不会被修改。
+
+## PDF 工具
+
+左侧选择「PDF 工具」，页面分三块：
+
+1. **页面编辑**：加载 PDF 后生成缩略图网格（最多显示前 50 页），可勾选、旋转、删除、拖拽排序，修改只在本地状态中累积，点击「应用并下载」后一次性提交。
+2. **合并**：按选择顺序合并至少两个 PDF，支持首尾相接、逐页交替、插入到指定位置（`0` 表示插到第 1 页之前）。
+3. **逐页导出 JPG**：为当前 PDF 的每一页生成 JPG 并打包 ZIP；每张图片必须小于等于设定上限，先降质量再降 DPI，到 `72 DPI + q50` 仍超限时该文件明确失败并给出当前体积，不会静默超限。
+
+页码始终是 **1-based 且指原文件页码**；旋转提交的是**最终角度**，会覆盖该页原有 rotation；`page_order` 非空时作为白名单，重复页码表示复制该页。提交后后端按「删页 / 重排 → 旋转」的顺序处理。
+
 ## 使用方式
 
 1. 打开页面，把文件拖进虚线区域，或点击选择文件。
@@ -104,6 +123,12 @@ py -3.11 -m venv .venv
 | `GET` | `/api/formats` | 由转换注册表反推的格式表 |
 | `POST` | `/api/convert` | multipart：`file` + `target`，返回 `task_id` |
 | `POST` | `/api/batch` | multipart：`files`（可重复）+ `target`，返回 `task_id`；结果在任务 `result` 中逐文件列出 |
+| `POST` | `/api/compress` | multipart：`file` + `level`（`80/60/40/20`），返回 `task_id`；只接受 PDF / 图片 |
+| `POST` | `/api/compress/estimate` | multipart：`file`，直接返回四档预估体积；PDF 抽样前 3 页 |
+| `POST` | `/api/pdf/merge` | multipart：`files`（至少 2 个）+ `mode`（`append/interleave/insert`）+ `insert_index`，返回 `task_id` |
+| `POST` | `/api/pdf/ops` | multipart：`file` + `delete_pages` / `rotations` / `page_order`（JSON 字符串），返回 `task_id` |
+| `POST` | `/api/pdf/preview` | multipart：`file` + `limit`（默认 50），直接返回每页 PNG base64、原 rotation 与尺寸 |
+| `POST` | `/api/pdf/to-jpg` | multipart：`files` + `max_kb`（默认 300），返回 `task_id`；完成后下载 ZIP |
 | `GET` | `/api/tasks/{task_id}` | 任务状态：`pending / running / done / error`、进度、结果 |
 | `GET` | `/api/download/{task_id}` | 仅完成任务可下载，中文文件名用 `filename*` 传递；批量任务用 `?file=<序号>` 下载单个文件 |
 
@@ -119,6 +144,14 @@ curl.exe -OJ http://127.0.0.1:8000/api/download/<task_id>
 rem 批量：同一 target 下可重复 files 字段
 curl.exe -F "files=@a.docx" -F "files=@b.docx" -F "target=pdf" http://127.0.0.1:8000/api/batch
 curl.exe -OJ "http://127.0.0.1:8000/api/download/<task_id>?file=0"
+
+rem 压缩与 PDF 工具
+curl.exe -F "file=@samples\示例_论文.pdf" -F "level=60" http://127.0.0.1:8000/api/compress
+curl.exe -F "file=@samples\示例_论文.pdf" http://127.0.0.1:8000/api/compress/estimate
+curl.exe -F "files=@a.pdf" -F "files=@b.pdf" -F "mode=append" http://127.0.0.1:8000/api/pdf/merge
+curl.exe -F "file=@a.pdf" -F "delete_pages=[2]" -F "rotations={\"1\":90}" http://127.0.0.1:8000/api/pdf/ops
+curl.exe -F "file=@a.pdf" -F "limit=10" http://127.0.0.1:8000/api/pdf/preview
+curl.exe -F "files=@a.pdf" -F "max_kb=300" http://127.0.0.1:8000/api/pdf/to-jpg
 ```
 
 ## 降级与已知限制
@@ -133,13 +166,18 @@ curl.exe -OJ "http://127.0.0.1:8000/api/download/<task_id>?file=0"
 - **Office 专属格式**：`.doc → pdf/docx` 需要 Word，`.ppt/.pptx → pdf` 与 `.pptx → png` 需要 PowerPoint。未安装时这些任务会失败并给出明确提示，不会返回 500。
 - **批量中的 Office 任务串行**：同一时刻仍只允许一个 Word/Excel/PowerPoint 实例；纯 Python 任务仍按 4 线程并行。
 - **批量 ZIP 会扁平化目录**：所有成功结果放在 ZIP 根目录，重名自动加 `(2)`、`(3)`；不还原原始文件夹层级。
-- 阶段 3–4 尚未实现：压缩、PDF 合并/拆分/旋转/重排、文献翻译、扫描增强与 OCR。
+- **PDF 压缩会丢文字层**：压缩结果是逐页 JPEG 重新封装的 PDF，不能再搜索、复制或选中文字；纯文字 PDF 可能变得更大。
+- **PDF 预览只渲染前 50 页**：长文档的后续页面仍会参与保存与导出，不会丢页，只是编辑界面不显示缩略图。
+- **逐页 JPG 有硬上限**：到 `72 DPI + q50` 仍超过设定 KB 时，该文件明确失败并给出当前体积，不会悄悄超限。
+- **本版没有 PDF 批注 / 拆分接口**：页面编辑通过 `delete_pages / rotations / page_order` 组合完成；拆分可理解为白名单式 `page_order`。
+- 阶段 4–5 尚未实现：文献翻译、扫描件增强、OCR 与最终演示打磨。
 
 ## 项目结构
 
 ```
 main.py            FastAPI 应用、上传校验、任务与下载
-converter.py       转换注册表与全部转换实现
+converter.py       转换注册表、全部转换实现与压缩
+pdf_tools.py       PDF 合并、页面操作、预览与逐页 JPG
 office_worker.py   独立子进程执行 Word/Excel/PPT COM
 static/            原生 HTML/CSS/JS 前端（无框架、无构建）
 tests/smoke.py     自启动服务的端到端冒烟测试
@@ -156,15 +194,19 @@ start.bat          Windows 一键启动
 .venv\Scripts\python.exe tests\smoke.py
 ```
 
-测试会在随机端口自行启动服务（关闭 Office），用真实 HTTP 上传完成 34 项检查，覆盖：
+测试会在随机端口自行启动服务（关闭 Office），用真实 HTTP 上传完成 48 项检查，覆盖：
 
-- 健康检查、配置上限、格式注册表、首页静态资源；
+- 健康检查、配置上限、格式注册表、首页静态资源与阶段 3 前端标记；
 - DOCX → TXT/HTML/MD/PDF、PDF → TXT/DOCX/JPG/PNG、XLSX → CSV/单表与多表、CSV → XLSX、XLS → XLSX/CSV、Markdown/TXT → PDF、图片互转与图片 → Word；
 - Office 不可用时 `.doc`/`.pptx` 的明确错误；
 - 批量 3 种格式的 ZIP 与单文件下载、坏文件失败隔离、ZIP 重名加序号、批量数量与参数校验；
-- 415 扩展名、400 不支持的组合、404、中文下载头与 CSV 的 UTF-8 BOM。
+- 415 扩展名、400 不支持的组合、404、中文下载头与 CSV 的 UTF-8 BOM；
+- PDF 预览（PNG base64、原 rotation、50 页截断）、加密 PDF 400；
+- PDF 删页 + 旋转、保留原 rotation、`page_order` 白名单与重复页、越界页码与空参数报错；
+- 合并三种模式的实际页序、四档压缩预估、PDF 文字层丢失、图片压缩、非 PDF/图片 400；
+- 逐页 JPG 全部 ≤300KB，以及上限无法达成时的明确失败。
 
-前端验证：桌面 1440px、移动 600px、浅色/深色主题均已人工检查；浏览器控制台无报错。
+前端验证：桌面与浅色/深色主题已用浏览器实际操作；压缩确认框、缩略图旋转/删除/拖拽排序、合并与 JPG 下载均验证通过，控制台无报错。
 
 ## 阶段规划
 
@@ -172,7 +214,7 @@ start.bat          Windows 一键启动
 | --- | --- | --- |
 | 1 | 骨架、异步任务、上传校验、6 类主干转换、界面、冒烟测试 | 已完成 |
 | 2 | 完整格式矩阵、批量与文件夹、失败清单与重试 | 已完成 |
-| 3 | 压缩、PDF 合并/拆分/旋转/重排、缩略图编辑器 | 计划中 |
+| 3 | 压缩、PDF 合并/删页/旋转/重排、缩略图编辑器、逐页 JPG | 已完成 |
 | 4 | 翻译（双语/仅译文/版式叠加）、术语表、扫描增强 | 计划中 |
 | 5 | 整体打磨、异常与性能验收、演示材料与交付 | 计划中 |
 
