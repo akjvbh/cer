@@ -25,6 +25,7 @@
 - 每块 ≤ 2000 字符，按段落边界切，不要把一句话劈开
 - 并发 3 个线程调用 `/chat/completions`，单个请求超时 120 秒
 - 429 / 5xx 重试 3 次，指数退避（2s、4s、8s）；4xx（除 429）直接报错并把接口返回的 `error.message` 带给用户
+- **失败策略**：任何一块在重试后仍失败，整个任务判 `error`，**不产出半成品文件**（不要交付一份翻译了一半的文档），错误信息里指出是第几段失败、为什么
 - Prompt 要求「只输出译文，不要解释、不要加引号、不要保留原文」
 - 术语表：`glossary.txt` 每行 `英文=中文`，`#` 开头是注释；拼进 system prompt；界面输入框的内容排在文件内容之后，可以覆盖
 
@@ -32,7 +33,9 @@
 
 - `bilingual`：DOCX 两列表格，左原文右译文，段落一一对应
 - `translated`：DOCX 纯译文，保留原文档的段落样式（标题层级尽量对应）
-- `layout`：PDF 原位覆盖——对每个文本块 `add_redact_annot` 抹掉原文，再 `insert_textbox` 用中文字体写译文；字号按原块矩形自适应，放不下就缩小到 6pt 为止，仍放不下就截断并加省略号。**必须嵌入中文字体**（用项目内 `assets/fonts/` 放一个开源中文字体，或调用系统 `msyh.ttc`/`simsun.ttc`），否则会输出方框
+- `layout`：PDF 原位覆盖——对每个文本块 `add_redact_annot` 抹掉原文，再 `insert_textbox` 用中文字体写译文；字号按原块矩形自适应，放不下就缩小到 6pt 为止，仍放不下就截断并加省略号
+  - **只接受 PDF 输入**：DOCX / TXT 直接返回 400 `{"error":"保留版式输出只支持 PDF，请先用格式转换转成 PDF"}`，不要内部偷偷转一道
+  - **必须嵌入中文字体**：用 `assets/fonts/` 里的 Noto Sans SC **子集**（常用 3500 字，3–5MB），不要整包字体（会让仓库多 10–20MB）；字体文件缺失时回退系统 `msyh.ttc`，再没有就报错说明，不允许输出一屏方框
 
 **进度**：总块数 N，每完成一块 `TASKS[id]["progress"] = int(done/N*100)`；message 写「正在翻译第 12/58 段」。
 
@@ -42,12 +45,12 @@
 - 找到四角：按左上/右上/右下/左下排序，`warpPerspective` 做透视矫正
 - 找不到合理四边形：不报错，退回「整图轻微裁边 + 增强」，note 写「未检测到纸张边界，已按原图增强」
 - 去阴影：用大核高斯模糊估背景，`cv2.divide(gray, background, scale=255)`，再按对比度做自适应阈值或 `CLAHE`
-- 输出 PNG（保留细节）或 JPG（默认 PNG），单文件
-- 前端展示「原图 / 结果」前后对比
+- 输出 PNG 彩色（默认）或 JPG，单文件；本版**不做 OCR**，扫描版 PDF 提取不到文字时在界面写明「需要 OCR，本版未内置」
+- 前端展示「原图 / 结果」并排对比
 
 ### 3. 接口
 
-- `POST /api/translate`：`file`、`target_lang`（默认 `zh`）、`mode`、`glossary` → `{"task_id"}`
+- `POST /api/translate`：`file`、`target_lang`（`zh` / `en`，界面双向可选）、`mode`、`glossary` → `{"task_id"}`
 - `POST /api/scan-photo`：`file` → 任务卡
 - `/api/config` 增加 `translate_configured`（检查 `TRANSLATE_API_KEY` 是否非空）和 `glossary`（读 `glossary.txt` 内容）
 - 未配置密钥时 `/api/translate` 返回 400 + `{"error":"未配置翻译密钥，请在 .env 里填写 TRANSLATE_API_KEY"}`
@@ -87,7 +90,8 @@ curl.exe -F "file=@samples\初稿_田螺厣盖个体识别.docx" -F "target_lang
 curl.exe -F "file=@samples\photo.jpg" http://127.0.0.1:8000/api/scan-photo
 ```
 
-- 找一个英文 PDF 或 DOCX，三种模式各跑一次：对照 DOCX 打开后左右两列能对上；`layout` 模式 PDF 里中文正常显示、没有方框、原文没有重叠残留
+- 找一个英文 PDF，三种模式各跑一次：对照 DOCX 打开后左右两列能对上；`layout` 模式 PDF 里中文正常显示、没有方框、原文没有重叠残留
+- 用 DOCX 试 `layout` 模式，必须返回 400 并提示「只支持 PDF 输入」，不能悄悄内部转换
 - 扫描件：拿手机拍一张有阴影、倾斜的纸，处理后的图边缘拉直、阴影基本消失
 - 翻译过程中进度条真实推进（不是 0 → 100）
 - `.\.venv\Scripts\python.exe tests\smoke.py` 全 PASS（新增：未配置密钥时的 400、术语表读取）

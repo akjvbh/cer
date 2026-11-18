@@ -49,7 +49,7 @@ pywin32; sys_platform == "win32"
   - 文件头校验：PDF 判断 `%PDF`，docx/xlsx/pptx 判断 `PK\x03\x04`，图片判断对应 magic
   - 落盘到 `uploads/<uuid4().hex>.<ext>`，**不使用用户提供的文件名作为路径**
 - 路由：
-  - `GET /api/health` → `{"status":"ok","office":true/false,"python":"3.11.x","version":"0.1.0"}`。office 字段通过一次 3 秒超时的探测得出（`win32com.client.Dispatch("Word.Application")` 成功即 true，异常或非 Windows 为 false），结果缓存 60 秒
+  - `GET /api/health` → `{"status":"ok","office":true/false,"python":"3.11.x","version":"0.2.0"}`。office 字段用**注册表或可执行文件探测**得出（查 `winword.exe` 是否安装 / COM 类是否注册），**不要启动 Word 探活**——拉起一个 WINWORD 进程既慢又会残留。结果缓存 60 秒
   - `GET /api/config` → `{"max_file_size_mb":200,"translate_configured":false,"glossary":""}`
   - `GET /api/formats` → **由转换器注册表自动生成**，不要手写第二份映射
   - `POST /api/convert`（`file`, `target`）→ 校验 → 生成 `task_id` → 同步执行 → 返回 `{"task_id","filename","size","download_url","note"}`
@@ -68,7 +68,7 @@ pywin32; sys_platform == "win32"
   - `pdf→jpg`：PyMuPDF 按 150 DPI 渲染第 1 页（多页留到阶段 3）
   - 图片→pdf：Pillow
   - `docx→pdf`：**优先**走 COM（`office_worker.py`），失败则走兜底
-- COM 单独放 `office_worker.py`：`pythoncom.CoInitialize()`、`DisplayAlerts=False`、`Visible=False`、全局 `threading.Lock`、超时（默认 600 秒）后 `taskkill /F /IM WINWORD.EXE`
+- COM 单独放 `office_worker.py`：`pythoncom.CoInitialize()`、`DisplayAlerts=False`、`Visible=False`、全局 `threading.Lock`、超时（默认 600 秒，读 `OFFICE_TIMEOUT_SECONDS`）后 `taskkill /F /IM WINWORD.EXE`
 - `docx→pdf` 兜底：用 PyMuPDF 的 `page.insert_htmlbox()` 把 docx 的段落、标题、列表、表格排成 PDF；note 写「Office 不可用，已用内置排版引擎，字体与行距可能与 Word 有出入」
 - 所有 handler 失败时抛 `ConversionError("中文原因")`，由路由层统一转成 `{"error": ...}`
 
@@ -104,7 +104,7 @@ pywin32; sys_platform == "win32"
 - 不允许 `except: pass`
 - 中文文件名在上传、日志、下载三处都不能出错
 - 没有 Office 时 `docx→pdf` 必须能出文件并带 `note`，不能 500
-- 本阶段只做同步转换；接口形态保留 `task_id`，方便阶段 3 换成异步
+- 本阶段只做同步转换，但接口形态保留 `task_id`，且**只保留一套任务模型**（`POST` 返回 `task_id` → `GET /api/tasks/{id}` → `GET /api/download/{id}`），阶段 3 直接把同步换成异步，不改契约
 
 ## 验收（请真实执行，把命令和输出贴给我）
 

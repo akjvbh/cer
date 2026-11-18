@@ -54,6 +54,7 @@
   - 已知限制：仅 Windows、Office COM 不支持并发、压缩丢文字层、无鉴权
   - 常见问题：Word 卡死、双击文字没反应、翻译未配置
 - `CHANGELOG.md`：按阶段记录
+- 把根目录的开发提示词文档（`00-*` ~ `08-*`、`README.md`）整理进 `docs/prompts/`，项目根目录只保留正式的 `README.md`
 - `.env.example`、`.gitignore`、`LICENSE`（MIT）
 
 ### 5. 提交前自检

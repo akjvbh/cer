@@ -239,7 +239,7 @@ def main() -> int:
             status, payload, _ = json_request("GET", "/api/health")
             assert status == 200 and payload.get("status") == "ok"
             assert payload.get("office") is False
-            assert payload.get("version") == "0.1.0"
+            assert payload.get("version") == "0.2.0"
             head_status, _, _ = http_request("HEAD", "/api/health")
             assert head_status == 200
 

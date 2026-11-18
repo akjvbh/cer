@@ -55,7 +55,7 @@ MAX_FILE_SIZE_MB = max(1, _env_int("MAX_FILE_SIZE_MB", 200))
 MAX_FILE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
 TASK_TTL_SECONDS = max(60, _env_int("TASK_TTL_SECONDS", 3600))
 CLEANUP_INTERVAL_SECONDS = max(60, _env_int("CLEANUP_INTERVAL_SECONDS", 600))
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 
 TASKS: dict[str, dict[str, Any]] = {}
 TASK_LOCK = threading.RLock()

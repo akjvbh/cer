@@ -7,7 +7,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-Private-lightgrey)
 
-> 当前为 **阶段 1（骨架与主干转换）**：界面、异步任务、上传校验、6 类主干链路已可用；批量、压缩、PDF 工具、AI 增强为后续阶段。
+> 当前版本 **0.2.0 / 阶段 1（骨架与主干转换）**：界面、异步任务、上传校验、6 类主干链路已可用；批量、压缩、PDF 工具、AI 增强为后续阶段。
 
 ## 快速开始
 
