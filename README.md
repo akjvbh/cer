@@ -7,7 +7,7 @@
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?logo=windows&logoColor=white)
 ![License](https://img.shields.io/badge/License-Private-lightgrey)
 
-> 当前版本 **0.3.0 / 阶段 3（压缩与 PDF 工具）**：转换矩阵与批量处理保持可用；新增 PDF / 图片四档压缩、压缩预估、PDF 合并、删页 / 旋转 / 重排 / 复制页、缩略图预览与逐页导出 JPG；AI 增强为后续阶段。
+> 当前版本 **0.4.0 / 阶段 4（AI 增强）**：在转换、批量、压缩与 PDF 工具之上，新增文献翻译（中英对照 / 纯译文 / 保留版式 PDF）与扫描件增强（透视矫正、裁边、去阴影）。翻译调用你配置的 OpenAI 兼容接口，其余处理全部在本机完成。
 
 ## 快速开始
 
@@ -84,6 +84,25 @@ py -3.11 -m venv .venv
 
 页码始终是 **1-based 且指原文件页码**；旋转提交的是**最终角度**，会覆盖该页原有 rotation；`page_order` 非空时作为白名单，重复页码表示复制该页。提交后后端按「删页 / 重排 → 旋转」的顺序处理。
 
+## AI 增强
+
+左侧选择「AI 增强」，页面分上下两块。
+
+**文献翻译**（PDF / DOCX / TXT，一次一个文件）：
+
+- PDF 按文字块提取并按「页码 → 纵坐标 → 横坐标」排序，折行会合并；页码、纯符号与过短片段会被过滤。DOCX 按正文顺序读取段落与表格单元格，TXT 按空行分段。扫描版 PDF 没有文字层时会明确提示，不会输出空文件。
+- 段落按顺序打包成**不超过 2000 字符**的块，最多 3 个块并发请求 `/chat/completions`；单次超时 120 秒，429/5xx 按 2/4/8 秒重试 3 次，其他 4xx 立即失败。任何一块失败则整个任务失败，不生成半成品，错误会说明是第几块、第几段。
+- **中英对照**：DOCX 两列表格，一段一行，左原文右译文。
+- **纯译文**：DOCX 只保留译文，尽量沿用原标题级别、列表与表格结构。
+- **保留版式**：只接受 PDF。先按段落矩形抹除原文，再把译文写回原位置；字号在 18pt 到 6pt 之间以 0.5pt 步进自动缩小，缩到 6pt 仍放不下才截断并加省略号。
+- 版式模式优先嵌入 `assets/fonts/` 的中文字体子集；遇到子集缺字时自动改用系统微软雅黑，两者都缺字则明确报错，不会画出方框。
+- 术语表由 `glossary.txt` 预填到界面，每行 `English=中文`，`#` 开头为注释。界面里追加的条目只对本次任务生效，写在后面的同名条目会覆盖前面的。
+- 进度按已完成块数计算，例如「正在翻译第 12/58 段」。
+
+**扫描件增强**（PNG / JPG / WEBP / BMP / GIF / TIFF）：先缩放长边到 1600px，再做灰度、模糊与 Canny 边缘检测，取面积最大的近似四边形做透视矫正；随后用大核高斯估计背景光并去除阴影，CLAHE 增强对比度，输出彩色 PNG。找不到纸张边界时不会报错，只做 1% 裁边并说明「未检测到纸张边界」。界面上原图与结果并排展示。
+
+本版不做 OCR。翻译只会把**提取出的段落文本**发送到你配置的接口；图片、PDF 文件本身与扫描件增强都不会离开本机。
+
 ## 使用方式
 
 1. 打开页面，把文件拖进虚线区域，或点击选择文件。
@@ -106,11 +125,11 @@ py -3.11 -m venv .venv
 | `MAX_BATCH_SIZE_MB` | `500` | 单批总大小上限 |
 | `OFFICE_ENABLED` | `1` | 是否允许调用本机 Office COM |
 | `OFFICE_TIMEOUT_SECONDS` | `600` | 单次 Office 转换超时；`start.bat` 的演示默认值为 120 |
-| `TRANSLATE_API_KEY` | 空 | 翻译能力预留（阶段 4） |
-| `TRANSLATE_BASE_URL` | DeepSeek 兼容地址 | 翻译接口地址（阶段 4） |
-| `TRANSLATE_MODEL` | `deepseek-chat` | 翻译模型（阶段 4） |
+| `TRANSLATE_API_KEY` | 空 | 翻译接口密钥；为空时「AI 增强」中的翻译区域置灰 |
+| `TRANSLATE_BASE_URL` | `https://api.deepseek.com/v1` | OpenAI 兼容接口前缀，实际请求 `<base>/chat/completions` |
+| `TRANSLATE_MODEL` | `deepseek-chat` | 翻译使用的模型名 |
 
-翻译是唯一可能把**提取出的文本**发送到外部地址的能力，且只发送到你配置的接口；其余转换全部在本机完成。
+翻译是唯一可能把**提取出的文本**发送到外部地址的能力，且只发送到你配置的接口；其余转换与扫描件增强全部在本机完成。密钥只从环境变量 / `.env` 读取，日志中只出现掩码（如 `sk-****ab`）。术语表放在项目根目录的 `glossary.txt`，由 `/api/config` 原样返回给前端预填。
 
 ## API
 
@@ -129,6 +148,8 @@ py -3.11 -m venv .venv
 | `POST` | `/api/pdf/ops` | multipart：`file` + `delete_pages` / `rotations` / `page_order`（JSON 字符串），返回 `task_id` |
 | `POST` | `/api/pdf/preview` | multipart：`file` + `limit`（默认 50），直接返回每页 PNG base64、原 rotation 与尺寸 |
 | `POST` | `/api/pdf/to-jpg` | multipart：`files` + `max_kb`（默认 300），返回 `task_id`；完成后下载 ZIP |
+| `POST` | `/api/translate` | multipart：`file` + `target_lang`（`zh/en`）+ `mode`（`bilingual/translated/layout`）+ `glossary`，返回 `task_id`；`layout` 只接受 PDF |
+| `POST` | `/api/scan-photo` | multipart：`file`（图片），返回 `task_id`；结果统一为 PNG |
 | `GET` | `/api/tasks/{task_id}` | 任务状态：`pending / running / done / error`、进度、结果 |
 | `GET` | `/api/download/{task_id}` | 仅完成任务可下载，中文文件名用 `filename*` 传递；批量任务用 `?file=<序号>` 下载单个文件 |
 
@@ -152,13 +173,22 @@ curl.exe -F "files=@a.pdf" -F "files=@b.pdf" -F "mode=append" http://127.0.0.1:8
 curl.exe -F "file=@a.pdf" -F "delete_pages=[2]" -F "rotations={\"1\":90}" http://127.0.0.1:8000/api/pdf/ops
 curl.exe -F "file=@a.pdf" -F "limit=10" http://127.0.0.1:8000/api/pdf/preview
 curl.exe -F "files=@a.pdf" -F "max_kb=300" http://127.0.0.1:8000/api/pdf/to-jpg
+
+rem AI 增强（翻译需先在 .env 填 TRANSLATE_API_KEY）
+curl.exe -F "file=@samples\示例_英文摘要.pdf" -F "target_lang=zh" -F "mode=bilingual" http://127.0.0.1:8000/api/translate
+curl.exe -F "file=@samples\示例_英文摘要.pdf" -F "target_lang=zh" -F "mode=layout" http://127.0.0.1:8000/api/translate
+curl.exe -F "file=@samples\示例_扫描照片.jpg" http://127.0.0.1:8000/api/scan-photo
 ```
 
 ## 降级与已知限制
 
 - **未安装 Office**：`docx → pdf` 自动使用 ReportLab 重新排版，文字可选中，但字体、行距、分页与原文件可能不同；页面会提示当前为降级模式。
 - **Office COM 串行执行**：同一时间只允许一个 Word/Excel/PowerPoint 实例执行转换，避免 COM 冲突；Office 超时后会被强制结束并清理残留进程。
-- **不提供 OCR**：扫描版 PDF 没有文字层时，转 TXT/DOCX 只能得到空内容，需等待阶段 4 的扫描增强能力。
+- **不提供 OCR**：扫描版 PDF 没有文字层时，翻译会明确提示提取不到文字；扫描件增强只改善图片质量，不识别文字。需要文字时请先用外部 OCR 工具识别。
+- **PDF 翻译按文字块提取**：多栏排版、文本框、脚注可能按坐标顺序重排；图片中的文字不会翻译。DOCX 只读取段落与表格，页眉页脚、文本框不参与翻译。
+- **保留版式是覆盖而非重排**：译文直接写回原段落矩形，字号最小 6pt；超出矩形且无法再缩时会截断并加省略号，不保证与原文逐像素一致。
+- **翻译依赖外部接口**：耗时与费用由你配置的服务和模型决定；本版不内置任何在线转换或免费翻译服务。
+- **中文字体子集缺字时改用系统字体**：先尝试项目内置的 Noto Sans SC 子集，缺字时回退到 Windows 微软雅黑；两者都没有的字形会明确报错，不会输出方框。
 - **PDF → DOCX 是推断版式**：表格、文本框、多栏可能错位，不保证与原文像素级一致。
 - **服务仅监听 `127.0.0.1`**：没有登录、权限与 HTTPS，请不要把端口暴露到局域网或公网。
 - **任务存在内存中**：重启服务后任务记录消失；结果默认保留 1 小时，过期自动清理。
@@ -170,7 +200,7 @@ curl.exe -F "files=@a.pdf" -F "max_kb=300" http://127.0.0.1:8000/api/pdf/to-jpg
 - **PDF 预览只渲染前 50 页**：长文档的后续页面仍会参与保存与导出，不会丢页，只是编辑界面不显示缩略图。
 - **逐页 JPG 有硬上限**：到 `72 DPI + q50` 仍超过设定 KB 时，该文件明确失败并给出当前体积，不会悄悄超限。
 - **本版没有 PDF 批注 / 拆分接口**：页面编辑通过 `delete_pages / rotations / page_order` 组合完成；拆分可理解为白名单式 `page_order`。
-- 阶段 4–5 尚未实现：文献翻译、扫描件增强、OCR 与最终演示打磨。
+- 阶段 5 尚未实现：最终演示打磨与整体性能验收。
 
 ## 项目结构
 
@@ -178,7 +208,11 @@ curl.exe -F "files=@a.pdf" -F "max_kb=300" http://127.0.0.1:8000/api/pdf/to-jpg
 main.py            FastAPI 应用、上传校验、任务与下载
 converter.py       转换注册表、全部转换实现与压缩
 pdf_tools.py       PDF 合并、页面操作、预览与逐页 JPG
+translator.py      翻译分段、并发调用、对照 / 纯译文 / 版式覆盖
+scanner.py         扫描件透视矫正、裁边、去阴影与对比度增强
 office_worker.py   独立子进程执行 Word/Excel/PPT COM
+assets/fonts/      中文 Noto Sans SC 子集（SIL OFL 1.1，许可见 OFL.txt）
+glossary.txt       术语表（英文=中文，界面自动预填）
 static/            原生 HTML/CSS/JS 前端（无框架、无构建）
 tests/smoke.py     自启动服务的端到端冒烟测试
 samples/           可直接拖入的示例文件
@@ -194,9 +228,9 @@ start.bat          Windows 一键启动
 .venv\Scripts\python.exe tests\smoke.py
 ```
 
-测试会在随机端口自行启动服务（关闭 Office），用真实 HTTP 上传完成 48 项检查，覆盖：
+测试会在随机端口自行启动服务（关闭 Office），并启动一个本地假模型接口，用真实 HTTP 上传完成 55 项检查，覆盖：
 
-- 健康检查、配置上限、格式注册表、首页静态资源与阶段 3 前端标记；
+- 健康检查、配置上限、翻译配置与术语表、格式注册表、首页静态资源与阶段 4 前端标记；
 - DOCX → TXT/HTML/MD/PDF、PDF → TXT/DOCX/JPG/PNG、XLSX → CSV/单表与多表、CSV → XLSX、XLS → XLSX/CSV、Markdown/TXT → PDF、图片互转与图片 → Word；
 - Office 不可用时 `.doc`/`.pptx` 的明确错误；
 - 批量 3 种格式的 ZIP 与单文件下载、坏文件失败隔离、ZIP 重名加序号、批量数量与参数校验；
@@ -204,9 +238,11 @@ start.bat          Windows 一键启动
 - PDF 预览（PNG base64、原 rotation、50 页截断）、加密 PDF 400；
 - PDF 删页 + 旋转、保留原 rotation、`page_order` 白名单与重复页、越界页码与空参数报错；
 - 合并三种模式的实际页序、四档压缩预估、PDF 文字层丢失、图片压缩、非 PDF/图片 400；
-- 逐页 JPG 全部 ≤300KB，以及上限无法达成时的明确失败。
+- 逐页 JPG 全部 ≤300KB，以及上限无法达成时的明确失败；
+- 翻译三种输出模式的成品结构、术语表生效、进度文案与百分比；保留版式拒绝 DOCX 返回明确 400；未配置密钥时 400；
+- 扫描件增强对倾斜 + 阴影照片完成四边形检测与透视矫正，非图片返回 415。
 
-前端验证：桌面与浅色/深色主题已用浏览器实际操作；压缩确认框、缩略图旋转/删除/拖拽排序、合并与 JPG 下载均验证通过，控制台无报错。
+前端验证：桌面与浅色/深色主题已用浏览器实际操作；压缩确认框、缩略图旋转/删除/拖拽排序、合并与 JPG 下载、翻译三种模式（含本地假接口）、扫描件原图/结果并排对比均验证通过，控制台无报错。未配置密钥时翻译区域置灰并显示配置说明。
 
 ## 阶段规划
 
@@ -215,7 +251,7 @@ start.bat          Windows 一键启动
 | 1 | 骨架、异步任务、上传校验、6 类主干转换、界面、冒烟测试 | 已完成 |
 | 2 | 完整格式矩阵、批量与文件夹、失败清单与重试 | 已完成 |
 | 3 | 压缩、PDF 合并/删页/旋转/重排、缩略图编辑器、逐页 JPG | 已完成 |
-| 4 | 翻译（双语/仅译文/版式叠加）、术语表、扫描增强 | 计划中 |
+| 4 | 翻译（双语/仅译文/版式叠加）、术语表、扫描增强 | 已完成 |
 | 5 | 整体打磨、异常与性能验收、演示材料与交付 | 计划中 |
 
 ## 隐私

@@ -31,6 +31,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 import converter
 import pdf_tools
+import scanner
+import translator
 
 BASE_DIR = Path(__file__).resolve().parent
 load_dotenv(BASE_DIR / ".env")
@@ -38,7 +40,6 @@ load_dotenv(BASE_DIR / ".env")
 UPLOADS_DIR = BASE_DIR / "uploads"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 STATIC_DIR = BASE_DIR / "static"
-GLOSSARY_PATH = BASE_DIR / "glossary.txt"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -61,7 +62,7 @@ MAX_BATCH_SIZE_MB = max(1, _env_int("MAX_BATCH_SIZE_MB", 500))
 MAX_BATCH_BYTES = MAX_BATCH_SIZE_MB * 1024 * 1024
 TASK_TTL_SECONDS = max(60, _env_int("TASK_TTL_SECONDS", 3600))
 CLEANUP_INTERVAL_SECONDS = max(60, _env_int("CLEANUP_INTERVAL_SECONDS", 600))
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 TASKS: dict[str, dict[str, Any]] = {}
 TASK_LOCK = threading.RLock()
@@ -837,6 +838,83 @@ def _run_pdf_to_jpg(
 
 
 # ---------------------------------------------------------------------------
+# AI 增强
+# ---------------------------------------------------------------------------
+
+def _run_translate(
+    task_id: str,
+    src: Path,
+    display: str,
+    mode: str,
+    target_lang: str,
+    glossary: str,
+) -> None:
+    _update_task(task_id, status="running", progress=1, message="正在提取段落")
+
+    def progress(value: int, message: str) -> None:
+        _update_task(task_id, progress=max(1, min(95, int(value))), message=message)
+
+    try:
+        output, note = translator.translate_document(
+            src,
+            display,
+            OUTPUTS_DIR / task_id,
+            mode,
+            target_lang,
+            glossary,
+            progress,
+        )
+        stem = _safe_stem(display)
+        base = {
+            "bilingual": f"{stem}_中英对照",
+            "translated": f"{stem}_译文",
+            "layout": f"{stem}_版式译文",
+        }[mode]
+        _finish_output_task(
+            task_id,
+            output,
+            base,
+            note,
+            output.suffix.lower().lstrip("."),
+            "翻译完成",
+        )
+    except (translator.TranslateError, converter.ConversionError) as exc:
+        LOGGER.warning("翻译失败 task=%s: %s", task_id, exc)
+        _fail_task(task_id, "翻译失败", str(exc))
+    except Exception:
+        LOGGER.exception("翻译出现未预期错误 task=%s", task_id)
+        _fail_task(task_id, "翻译失败", "翻译失败，请检查文件是否损坏或稍后重试")
+    finally:
+        src.unlink(missing_ok=True)
+
+
+def _run_scan(task_id: str, src: Path, display: str) -> None:
+    _update_task(task_id, status="running", progress=5, message="正在读取图片")
+
+    def progress(value: int, message: str) -> None:
+        _update_task(task_id, progress=max(5, min(98, int(value))), message=message)
+
+    try:
+        output, note = scanner.enhance(src, OUTPUTS_DIR / task_id, progress)
+        _finish_output_task(
+            task_id,
+            output,
+            f"{_safe_stem(display)}_扫描增强",
+            note,
+            "png",
+            "扫描件增强完成",
+        )
+    except converter.ConversionError as exc:
+        LOGGER.warning("扫描件增强失败 task=%s: %s", task_id, exc)
+        _fail_task(task_id, "扫描件增强失败", str(exc))
+    except Exception:
+        LOGGER.exception("扫描件增强出现未预期错误 task=%s", task_id)
+        _fail_task(task_id, "扫描件增强失败", "扫描件增强失败，请换一张图片重试")
+    finally:
+        src.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
 # 接口
 # ---------------------------------------------------------------------------
 
@@ -869,18 +947,12 @@ def health_head():
 
 @app.get("/api/config")
 def config():
-    glossary = ""
-    if GLOSSARY_PATH.exists():
-        try:
-            glossary = GLOSSARY_PATH.read_text(encoding="utf-8-sig")
-        except Exception:
-            LOGGER.warning("读取术语表失败", exc_info=True)
     return {
         "max_file_size_mb": MAX_FILE_SIZE_MB,
         "max_batch_files": MAX_BATCH_FILES,
         "max_batch_size_mb": MAX_BATCH_SIZE_MB,
-        "translate_configured": bool(os.getenv("TRANSLATE_API_KEY", "").strip()),
-        "glossary": glossary,
+        "translate_configured": translator.is_configured(),
+        "glossary": translator.read_glossary_file(),
     }
 
 
@@ -1201,6 +1273,71 @@ async def pdf_to_jpg_api(
         "status": "pending",
         "filename": f"JPG 导出 {len(saved)} 个 PDF",
         "size": total_size,
+        "download_url": f"/api/download/{task_id}",
+        "note": "",
+    }
+
+
+@app.post("/api/translate")
+async def translate_api(
+    file: UploadFile = File(...),
+    target_lang: str = Form("zh"),
+    mode: str = Form("bilingual"),
+    glossary: str = Form(""),
+):
+    display = _sanitize_filename(file.filename)
+    ext = _extension(display)
+    mode = (mode or "bilingual").strip().lower()
+    target_lang = (target_lang or "zh").strip().lower()
+
+    if not translator.is_configured():
+        await file.close()
+        raise ApiError(400, "未配置翻译密钥，请在 .env 里填写 TRANSLATE_API_KEY")
+    if ext not in {"pdf", "docx", "txt"}:
+        await file.close()
+        raise ApiError(415, f"文献翻译只支持 PDF、DOCX、TXT，不支持 .{ext or '未知'} 文件")
+    if target_lang not in {"zh", "en"}:
+        await file.close()
+        raise ApiError(400, "目标语言无效，只支持 zh / en")
+    if mode not in {"bilingual", "translated", "layout"}:
+        await file.close()
+        raise ApiError(400, "输出方式无效，只支持 bilingual / translated / layout")
+    if mode == "layout" and ext != "pdf":
+        await file.close()
+        raise ApiError(400, "保留版式输出只支持 PDF，请先用格式转换转成 PDF")
+
+    src, display, size = await _save_upload(file, {"pdf", "docx", "txt"})
+    if ext == "pdf":
+        try:
+            _check_pdf(src, display)
+        except ApiError:
+            src.unlink(missing_ok=True)
+            raise
+
+    task_id = uuid.uuid4().hex
+    _new_task(task_id, display, size, mode=mode, target_lang=target_lang)
+    _start_task_thread(_run_translate, task_id, src, display, mode, target_lang, glossary)
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "filename": display,
+        "size": size,
+        "download_url": f"/api/download/{task_id}",
+        "note": "",
+    }
+
+
+@app.post("/api/scan-photo")
+async def scan_photo_api(file: UploadFile = File(...)):
+    src, display, size = await _save_upload(file, set(converter.IMAGE_EXTS))
+    task_id = uuid.uuid4().hex
+    _new_task(task_id, display, size)
+    _start_task_thread(_run_scan, task_id, src, display)
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "filename": display,
+        "size": size,
         "download_url": f"/api/download/{task_id}",
         "note": "",
     }

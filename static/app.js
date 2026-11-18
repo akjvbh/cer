@@ -81,6 +81,19 @@ const state = {
             jpg: 0,
         },
     },
+    ai: {
+        translate: {
+            file: null,
+            mode: "bilingual",
+            configured: false,
+            busy: false,
+        },
+        scan: {
+            file: null,
+            busy: false,
+            originalUrl: "",
+        },
+    },
 };
 
 const COMPRESS_LEVEL_SPECS = {
@@ -91,6 +104,8 @@ const COMPRESS_LEVEL_SPECS = {
 };
 const COMPRESS_LEVELS = ["80", "60", "40", "20"];
 const COMPRESS_IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"];
+const TRANSLATE_EXTS = ["pdf", "docx", "txt"];
+const SCAN_EXTS = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"];
 
 const $ = (id) => document.getElementById(id);
 
@@ -247,6 +262,14 @@ async function loadConfigAndFormats() {
         state.batch.maxBatchMb = Number(config && config.max_batch_size_mb) > 0
             ? Number(config.max_batch_size_mb)
             : 500;
+        state.ai.translate.configured = Boolean(config && config.translate_configured);
+        const glossary = config && typeof config.glossary === "string" ? config.glossary : "";
+        state.ai.translate.glossary = glossary;
+        const glossaryInput = $("translate-glossary");
+        if (glossaryInput) {
+            glossaryInput.value = glossary;
+        }
+        updateTranslateUi();
         const input = $("file-input");
         const extensions = Object.keys(state.formats).map((ext) => `.${ext}`).join(",");
         input.accept = extensions;
@@ -2614,6 +2637,442 @@ async function startMerge() {
     }
 }
 
+function resetAiResults(listId, emptyId) {
+    const list = $(listId);
+    if (list) {
+        list.replaceChildren();
+    }
+    const empty = $(emptyId);
+    if (empty) {
+        empty.hidden = false;
+    }
+}
+
+function updateTranslateModeHint() {
+    const tr = state.ai.translate;
+    const hint = $("translate-mode-hint");
+    if (!hint) {
+        return;
+    }
+    if (!tr.configured) {
+        hint.textContent = "配置 TRANSLATE_API_KEY 后启用；格式转换与 PDF 工具不受影响。";
+        return;
+    }
+    const ext = tr.file ? getExtension(tr.file.name) : "";
+    if (tr.mode === "layout") {
+        hint.textContent = ext && ext !== "pdf"
+            ? "当前文件不是 PDF，保留版式只接受 PDF 输入。"
+            : "按原页面位置覆盖译文；只接受 PDF，字号会在 6–18pt 之间自动缩放。";
+        return;
+    }
+    hint.textContent = tr.mode === "translated"
+        ? "只输出译文 DOCX，保留标题级别、列表与表格结构。"
+        : "生成 DOCX 两列表格，左原文右译文，一段一行。";
+}
+
+function updateTranslateUi() {
+    const tr = state.ai.translate;
+    const configured = tr.configured;
+    const file = tr.file;
+    const ext = file ? getExtension(file.name) : "";
+    const layoutBlocked = tr.mode === "layout" && Boolean(file) && ext !== "pdf";
+
+    $("translate-panel").classList.toggle("is-locked", !configured);
+    $("translate-panel").classList.toggle("is-busy", tr.busy);
+    $("translate-config-warning").hidden = configured;
+    $("translate-tag").textContent = configured ? "PDF / DOCX / TXT" : "未配置密钥";
+
+    const zone = $("translate-dropzone");
+    zone.classList.toggle("is-disabled", tr.busy || !configured);
+    zone.setAttribute("aria-disabled", tr.busy || !configured ? "true" : "false");
+
+    const button = $("translate-btn");
+    button.disabled = !configured || !file || tr.busy || layoutBlocked;
+    $("translate-btn-text").textContent = tr.busy ? "正在翻译…" : "开始翻译";
+    $("translate-remove").disabled = tr.busy || !file;
+    $("translate-lang").disabled = tr.busy || !configured;
+    $("translate-glossary").disabled = tr.busy || !configured;
+
+    document.querySelectorAll("#translate-modes .mode-card").forEach((card) => {
+        card.classList.toggle("is-active", card.dataset.mode === tr.mode);
+        card.disabled = tr.busy || !configured;
+    });
+    updateTranslateModeHint();
+}
+
+function setTranslateMode(mode) {
+    const tr = state.ai.translate;
+    if (tr.busy || !["bilingual", "translated", "layout"].includes(mode)) {
+        return;
+    }
+    if (mode === "layout" && tr.file && getExtension(tr.file.name) !== "pdf") {
+        showToast("保留版式输出只支持 PDF，请先用格式转换转成 PDF", "error");
+        return;
+    }
+    tr.mode = mode;
+    updateTranslateUi();
+}
+
+function setTranslateFile(file) {
+    const tr = state.ai.translate;
+    if (!file || tr.busy || !tr.configured) {
+        return;
+    }
+    const ext = getExtension(file.name);
+    if (!TRANSLATE_EXTS.includes(ext)) {
+        showToast("翻译只支持 PDF、DOCX 和 TXT 文件", "error");
+        return;
+    }
+    if (file.size === 0) {
+        showToast("这个文件是空的，请选择有内容的文件", "error");
+        return;
+    }
+    if (file.size > state.maxFileMb * 1024 * 1024) {
+        showToast(`文件超过 ${state.maxFileMb}MB 上限`, "error");
+        return;
+    }
+    tr.file = file;
+    if (tr.mode === "layout" && ext !== "pdf") {
+        tr.mode = "translated";
+        showToast("保留版式只接受 PDF，已切换到纯译文", "info");
+    }
+    const icon = $("translate-file-icon");
+    icon.textContent = ext.toUpperCase().slice(0, 4);
+    icon.className = `file-icon ${ext === "pdf" ? "kind-pdf" : "kind-text"}`;
+    $("translate-file-name").textContent = file.name;
+    $("translate-file-size").textContent = `${formatBytes(file.size)} · ${ext.toUpperCase()} 文件`;
+    $("translate-selected").hidden = false;
+    resetAiResults("translate-result-list", "translate-empty");
+    updateTranslateUi();
+}
+
+function clearTranslateFile() {
+    const tr = state.ai.translate;
+    if (tr.busy) {
+        showToast("翻译进行中，请完成后再移除文件", "warning");
+        return;
+    }
+    tr.file = null;
+    $("translate-file-input").value = "";
+    $("translate-selected").hidden = true;
+    resetAiResults("translate-result-list", "translate-empty");
+    showTaskProgress("translate", false);
+    updateTranslateUi();
+}
+
+function finishTranslateTask() {
+    state.ai.translate.busy = false;
+    updateTranslateUi();
+    window.setTimeout(() => showTaskProgress("translate", false), 900);
+}
+
+async function startTranslate() {
+    const tr = state.ai.translate;
+    if (tr.busy || !tr.file) {
+        return;
+    }
+    if (!tr.configured) {
+        showToast("未配置翻译密钥，请在 .env 里填写 TRANSLATE_API_KEY", "error");
+        return;
+    }
+    const ext = getExtension(tr.file.name);
+    if (tr.mode === "layout" && ext !== "pdf") {
+        showToast("保留版式输出只支持 PDF，请先用格式转换转成 PDF", "error");
+        return;
+    }
+
+    tr.busy = true;
+    resetAiResults("translate-result-list", "translate-empty");
+    updateTranslateUi();
+    showTaskProgress("translate", true);
+    setTaskProgress("translate", 0, "正在上传文件");
+
+    const form = new FormData();
+    form.append("file", tr.file);
+    form.append("target_lang", $("translate-lang").value === "en" ? "en" : "zh");
+    form.append("mode", tr.mode);
+    form.append("glossary", $("translate-glossary").value || "");
+
+    try {
+        const data = await uploadTaskRequest("/api/translate", form, (percent) => {
+            setTaskProgress("translate", Math.round(percent * 0.08), `正在上传 ${percent}%`);
+        });
+        setTaskProgress("translate", 8, "已提交，正在提取段落");
+        watchTask(data.task_id, {
+            onProgress: (task) => {
+                const value = 8 + Math.round((Number(task.progress) || 0) * 0.92);
+                setTaskProgress("translate", value, task.message || "正在翻译");
+            },
+            onDone: (task) => {
+                setTaskProgress("translate", 100, "翻译完成");
+                appendOperationResult("translate-result-list", task.result);
+                $("translate-empty").hidden = true;
+                finishTranslateTask();
+                showToast("翻译完成，可下载结果", "success");
+            },
+            onError: (message) => {
+                appendOperationError("translate-result-list", message, "翻译失败");
+                $("translate-empty").hidden = true;
+                finishTranslateTask();
+                showToast(message || "翻译失败", "error");
+            },
+        });
+    } catch (error) {
+        appendOperationError("translate-result-list", error.message || "上传失败", "翻译失败");
+        $("translate-empty").hidden = true;
+        setTaskProgress("translate", 0, "上传失败");
+        finishTranslateTask();
+        showToast(error.message || "上传失败", "error");
+    }
+}
+
+function updateScanUi() {
+    const scan = state.ai.scan;
+    const button = $("scan-btn");
+    button.disabled = scan.busy || !scan.file;
+    $("scan-btn-text").textContent = scan.busy ? "增强中…" : "开始增强";
+    $("scan-remove").disabled = scan.busy || !scan.file;
+    const zone = $("scan-dropzone");
+    zone.classList.toggle("is-disabled", scan.busy);
+    zone.setAttribute("aria-disabled", scan.busy ? "true" : "false");
+}
+
+function resetScanPreview() {
+    const img = $("scan-result");
+    img.hidden = true;
+    img.removeAttribute("src");
+    const placeholder = $("scan-result-placeholder");
+    placeholder.hidden = false;
+    placeholder.textContent = "增强结果会显示在这里";
+}
+
+function setScanFile(file) {
+    const scan = state.ai.scan;
+    if (!file || scan.busy) {
+        return;
+    }
+    const ext = getExtension(file.name);
+    if (!SCAN_EXTS.includes(ext)) {
+        showToast("扫描件增强只接受图片文件", "error");
+        return;
+    }
+    if (file.size === 0) {
+        showToast("这个文件是空的，请选择有内容的照片", "error");
+        return;
+    }
+    if (file.size > state.maxFileMb * 1024 * 1024) {
+        showToast(`文件超过 ${state.maxFileMb}MB 上限`, "error");
+        return;
+    }
+    if (scan.originalUrl) {
+        URL.revokeObjectURL(scan.originalUrl);
+    }
+    scan.file = file;
+    scan.originalUrl = URL.createObjectURL(file);
+    const icon = $("scan-file-icon");
+    icon.textContent = ext.toUpperCase().slice(0, 4);
+    icon.className = "file-icon kind-image";
+    $("scan-file-name").textContent = file.name;
+    $("scan-file-size").textContent = `${formatBytes(file.size)} · ${ext.toUpperCase()} 图片`;
+    $("scan-selected").hidden = false;
+    $("scan-compare").hidden = false;
+    $("scan-original").src = scan.originalUrl;
+    resetAiResults("scan-result-list", "scan-empty");
+    $("scan-empty").hidden = true;
+    resetScanPreview();
+    updateScanUi();
+}
+
+function clearScanFile() {
+    const scan = state.ai.scan;
+    if (scan.busy) {
+        showToast("增强进行中，请完成后再移除照片", "warning");
+        return;
+    }
+    if (scan.originalUrl) {
+        URL.revokeObjectURL(scan.originalUrl);
+        scan.originalUrl = "";
+    }
+    scan.file = null;
+    $("scan-file-input").value = "";
+    $("scan-selected").hidden = true;
+    $("scan-compare").hidden = true;
+    $("scan-original").removeAttribute("src");
+    resetAiResults("scan-result-list", "scan-empty");
+    showTaskProgress("scan", false);
+    updateScanUi();
+}
+
+function finishScanTask() {
+    state.ai.scan.busy = false;
+    updateScanUi();
+    window.setTimeout(() => showTaskProgress("scan", false), 900);
+}
+
+async function startScan() {
+    const scan = state.ai.scan;
+    if (scan.busy || !scan.file) {
+        return;
+    }
+    scan.busy = true;
+    resetAiResults("scan-result-list", "scan-empty");
+    resetScanPreview();
+    updateScanUi();
+    showTaskProgress("scan", true);
+    setTaskProgress("scan", 0, "正在上传照片");
+
+    const form = new FormData();
+    form.append("file", scan.file);
+
+    try {
+        const data = await uploadTaskRequest("/api/scan-photo", form, (percent) => {
+            setTaskProgress("scan", Math.round(percent * 0.1), `正在上传 ${percent}%`);
+        });
+        setTaskProgress("scan", 10, "已提交，正在检测纸张边界");
+        watchTask(data.task_id, {
+            onProgress: (task) => {
+                const value = 10 + Math.round((Number(task.progress) || 0) * 0.9);
+                setTaskProgress("scan", value, task.message || "正在增强扫描件");
+            },
+            onDone: (task) => {
+                setTaskProgress("scan", 100, "增强完成");
+                appendOperationResult("scan-result-list", task.result);
+                $("scan-empty").hidden = true;
+                const url = safeDownloadUrl(task.result && task.result.download_url);
+                if (url) {
+                    const img = $("scan-result");
+                    img.src = url;
+                    img.hidden = false;
+                    $("scan-result-placeholder").hidden = true;
+                } else {
+                    $("scan-result-placeholder").textContent = "增强完成，请从下方结果卡片下载";
+                }
+                finishScanTask();
+                showToast("扫描件增强完成", "success");
+            },
+            onError: (message) => {
+                appendOperationError("scan-result-list", message, "增强失败");
+                $("scan-empty").hidden = true;
+                $("scan-result-placeholder").textContent = "增强失败，可查看下方原因后重试";
+                finishScanTask();
+                showToast(message || "增强失败", "error");
+            },
+        });
+    } catch (error) {
+        appendOperationError("scan-result-list", error.message || "上传失败", "增强失败");
+        $("scan-empty").hidden = true;
+        $("scan-result-placeholder").textContent = "增强失败，可查看下方原因后重试";
+        setTaskProgress("scan", 0, "上传失败");
+        finishScanTask();
+        showToast(error.message || "上传失败", "error");
+    }
+}
+
+function bindAiDropzone(zoneId, inputId, isBusy, onFile) {
+    const zone = $(zoneId);
+    const input = $(inputId);
+    zone.addEventListener("click", (event) => {
+        if (event.target === input) {
+            return;
+        }
+        if (isBusy()) {
+            showToast("正在处理，请稍候", "warning");
+            return;
+        }
+        input.click();
+    });
+    zone.addEventListener("keydown", (event) => {
+        if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            zone.click();
+        }
+    });
+    input.addEventListener("change", () => {
+        const file = input.files && input.files[0];
+        input.value = "";
+        if (file) {
+            onFile(file);
+        }
+    });
+    ["dragenter", "dragover"].forEach((name) => {
+        zone.addEventListener(name, (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!isBusy()) {
+                zone.classList.add("dragover");
+            }
+        });
+    });
+    ["dragleave", "drop"].forEach((name) => {
+        zone.addEventListener(name, (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            zone.classList.remove("dragover");
+        });
+    });
+    zone.addEventListener("drop", (event) => {
+        if (isBusy()) {
+            showToast("正在处理，请稍候", "warning");
+            return;
+        }
+        if (dropHasDirectory(event.dataTransfer)) {
+            showToast("这里只接收单个文件，请直接拖入文件", "info");
+            return;
+        }
+        const files = event.dataTransfer && event.dataTransfer.files
+            ? Array.from(event.dataTransfer.files)
+            : [];
+        if (files.length > 1) {
+            showToast("一次只处理一个文件，请只选择一个", "info");
+            return;
+        }
+        if (files[0]) {
+            onFile(files[0]);
+        }
+    });
+}
+
+function bindAiEvents() {
+    bindAiDropzone(
+        "translate-dropzone",
+        "translate-file-input",
+        () => state.ai.translate.busy,
+        setTranslateFile
+    );
+    $("translate-remove").addEventListener("click", clearTranslateFile);
+    $("translate-modes").addEventListener("click", (event) => {
+        const card = event.target.closest("[data-mode]");
+        if (card) {
+            setTranslateMode(card.dataset.mode);
+        }
+    });
+    $("translate-btn").addEventListener("click", startTranslate);
+
+    bindAiDropzone(
+        "scan-dropzone",
+        "scan-file-input",
+        () => state.ai.scan.busy,
+        setScanFile
+    );
+    $("scan-remove").addEventListener("click", clearScanFile);
+    $("scan-btn").addEventListener("click", startScan);
+
+    ["translate-result-list", "scan-result-list"].forEach((id) => {
+        $(id).addEventListener("click", (event) => {
+            const button = event.target.closest('[data-action="copy-error"]');
+            if (!button) {
+                return;
+            }
+            const card = button.closest(".result-card");
+            const notes = card ? Array.from(card.querySelectorAll(".result-note")) : [];
+            const text = notes.map((node) => node.textContent || "").join("\n").trim();
+            if (text) {
+                copyText(text);
+            }
+        });
+    });
+}
+
 function activatePage(page) {
     document.querySelectorAll(".nav-item").forEach((item) => {
         item.classList.toggle("active", item.dataset.page === page);
@@ -2988,6 +3447,7 @@ function bindEvents() {
     bindBatchEvents();
     bindCompressEvents();
     bindPdfEvents();
+    bindAiEvents();
 }
 
 document.addEventListener("DOMContentLoaded", () => {

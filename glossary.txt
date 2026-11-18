@@ -1,0 +1,8 @@
+# 术语表：每行一条「英文=中文」，# 开头为注释。
+# 界面里的术语表已预填本文件，可在本次任务中追加或覆盖；
+# 写在后面的同名条目会覆盖前面的。
+artificial intelligence=人工智能
+machine learning=机器学习
+deep learning=深度学习
+neural network=神经网络
+large language model=大语言模型

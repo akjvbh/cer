@@ -1,4 +1,4 @@
-"""阶段 1 端到端冒烟测试：自起服务，真实上传、转换、轮询、下载。"""
+"""端到端冒烟测试：自起服务，真实上传、转换、翻译、扫描增强、轮询、下载。"""
 
 from __future__ import annotations
 
@@ -10,11 +10,13 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.request
 import uuid
 import zipfile
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import fitz
@@ -31,6 +33,66 @@ PASSED: list[str] = []
 FAILED: list[str] = []
 SERVER_LOG: Path | None = None
 BASE_URL = ""
+
+
+class MockChatHandler(BaseHTTPRequestHandler):
+    """本地假模型接口：按 <<<SEG>>> 数量返回等量译文。"""
+
+    last_system = ""
+    last_user = ""
+    calls = 0
+    lock = threading.Lock()
+
+    def do_POST(self) -> None:
+        length = int(self.headers.get("Content-Length", "0"))
+        try:
+            payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        except Exception:
+            self.send_error(400)
+            return
+        messages = payload.get("messages") or []
+        system = "\n".join(
+            str(item.get("content", "")) for item in messages if item.get("role") == "system"
+        )
+        user = "\n".join(
+            str(item.get("content", "")) for item in messages if item.get("role") == "user"
+        )
+        parts = user.split("<<<SEG>>>")
+        translated = [f"译文{index + 1}" for index in range(len(parts))]
+        with self.lock:
+            call_index = type(self).calls
+            type(self).calls += 1
+            type(self).last_system = system
+            type(self).last_user = user
+        # 让第一次请求明显更慢，保证轮询能观察到块级进度
+        time.sleep(2.0 if call_index == 0 else 0.3)
+        response = json.dumps(
+            {
+                "id": "mock",
+                "object": "chat.completion",
+                "choices": [
+                    {"index": 0, "message": {"role": "assistant", "content": "<<<SEG>>>".join(translated)}}
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+def start_mock_chat() -> tuple[ThreadingHTTPServer, int]:
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MockChatHandler)
+    server.daemon_threads = True
+    thread = threading.Thread(target=server.serve_forever, name="mock-chat", daemon=True)
+    thread.start()
+    return server, int(server.server_address[1])
 
 
 def pick_port() -> int:
@@ -99,6 +161,65 @@ def multipart_batch(
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Content-Length": str(len(body))},
         timeout=timeout,
     )
+
+
+def poll_task_tracked(task_id: str, timeout_seconds: int = 120) -> tuple[dict, list[str], list[int]]:
+    """轮询直到结束，同时收集出现过的进度文案与百分比。"""
+    deadline = time.time() + timeout_seconds
+    messages: list[str] = []
+    percents: list[int] = []
+    while time.time() < deadline:
+        status, payload, _ = json_request("GET", f"/api/tasks/{task_id}")
+        if status != 200:
+            raise AssertionError(f"轮询失败 HTTP {status}: {payload}")
+        message = str(payload.get("message") or "")
+        if message and (not messages or messages[-1] != message):
+            messages.append(message)
+        percent = int(payload.get("progress") or 0)
+        percents.append(percent)
+        if payload["status"] == "done":
+            return payload, messages, percents
+        if payload["status"] == "error":
+            raise AssertionError(f"任务失败：{payload.get('error')}")
+        time.sleep(0.15)
+    raise AssertionError("任务在 120 秒内没有完成")
+
+
+def submit_translate(
+    filename: str,
+    content: bytes,
+    mode: str,
+    lang: str = "zh",
+    glossary: str = "",
+    content_type: str = "application/pdf",
+) -> str:
+    body, boundary = multipart_named(
+        {"target_lang": lang, "mode": mode, "glossary": glossary},
+        [(filename, content, content_type)],
+        field_name="file",
+    )
+    status, _, response = http_request(
+        "POST",
+        "/api/translate",
+        data=body,
+        headers={"Content-Type": boundary, "Content-Length": str(len(body))},
+    )
+    if status != 200:
+        raise AssertionError(f"翻译提交失败 HTTP {status}: {response.decode('utf-8', 'replace')}")
+    return json.loads(response.decode("utf-8"))["task_id"]
+
+
+def submit_scan(filename: str, content: bytes, content_type: str = "image/jpeg") -> str:
+    body, boundary = multipart_named({}, [(filename, content, content_type)], field_name="file")
+    status, _, response = http_request(
+        "POST",
+        "/api/scan-photo",
+        data=body,
+        headers={"Content-Type": boundary, "Content-Length": str(len(body))},
+    )
+    if status != 200:
+        raise AssertionError(f"扫描件提交失败 HTTP {status}: {response.decode('utf-8', 'replace')}")
+    return json.loads(response.decode("utf-8"))["task_id"]
 
 
 def poll_task(task_id: str, timeout_seconds: int = 120) -> dict:
@@ -358,6 +479,41 @@ def make_samples(directory: Path) -> dict[str, Path]:
     image.save(str(image_path), "PNG")
     image.close()
 
+    english_path = directory / "english.pdf"
+    english = fitz.open()
+    try:
+        for page_index in range(3):
+            page = english.new_page()
+            for row in range(6):
+                text = (
+                    f"Section {page_index + 1}.{row + 1}. This study evaluates document conversion "
+                    "workflows for multilingual academic papers. The proposed pipeline preserves "
+                    "paragraph order, heading levels and table structure while keeping every file "
+                    "on the local machine. Results show stable output across repeated runs."
+                )
+                page.insert_textbox(fitz.Rect(56, 60 + row * 118, 539, 168 + row * 118), text, fontsize=10)
+        english.save(str(english_path))
+    finally:
+        english.close()
+
+    scan_path = directory / "photo.jpg"
+    width, height = 1000, 800
+    canvas = Image.new("RGB", (width, height), (52, 55, 62))
+    canvas_draw = ImageDraw.Draw(canvas)
+    paper = [(230, 120), (850, 180), (800, 700), (180, 640)]
+    canvas_draw.polygon(paper, fill=(248, 246, 238))
+    for line in range(9):
+        y = 220 + line * 48
+        canvas_draw.line((280, y, 740, y + 8), fill=(48, 48, 52), width=3)
+    gradient = Image.linear_gradient("L").resize((width, height))
+    shade = Image.new("RGB", (width, height), (18, 18, 24))
+    alpha = gradient.point(lambda value: int(value * 0.38))
+    canvas = Image.composite(shade, canvas, alpha)
+    grain = Image.effect_noise((width, height), 28).convert("RGB")
+    canvas = Image.blend(canvas, grain, 0.05)
+    canvas.save(str(scan_path), "JPEG", quality=88)
+    canvas.close()
+
     md_path = directory / "smoke.md"
     md_path.write_text("# 烟雾测试标题\n\n这是 **Markdown** 正文。\n\n| A | B |\n|---|---|\n| 1 | 2 |\n", encoding="utf-8")
 
@@ -413,6 +569,8 @@ def make_samples(directory: Path) -> dict[str, Path]:
         "pages3": pages3_path,
         "noisy": noisy_pdf_path,
         "png": image_path,
+        "english": english_path,
+        "photo": scan_path,
         "md": md_path,
         "txt": txt_path,
         "exe": exe_path,
@@ -434,6 +592,7 @@ def main() -> int:
     SERVER_LOG = temp_dir / "server.log"
     samples = make_samples(temp_dir)
     log_handle = SERVER_LOG.open("wb")
+    mock_server, mock_port = start_mock_chat()
 
     env = os.environ.copy()
     env.update(
@@ -444,6 +603,9 @@ def main() -> int:
             "PYTHONUNBUFFERED": "1",
             "TASK_TTL_SECONDS": "3600",
             "CLEANUP_INTERVAL_SECONDS": "60",
+            "TRANSLATE_API_KEY": "sk-smoke-mock-key",
+            "TRANSLATE_BASE_URL": f"http://127.0.0.1:{mock_port}/v1",
+            "TRANSLATE_MODEL": "mock-model",
         }
     )
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -482,7 +644,7 @@ def main() -> int:
             assert payload.get("office") is False
             assert payload.get("excel") is False
             assert payload.get("powerpoint") is False
-            assert payload.get("version") == "0.3.0"
+            assert payload.get("version") == "0.4.0"
             head_status, _, _ = http_request("HEAD", "/api/health")
             assert head_status == 200
 
@@ -494,8 +656,11 @@ def main() -> int:
             assert payload["max_file_size_mb"] == 200
             assert payload["max_batch_files"] == 200
             assert payload["max_batch_size_mb"] == 500
+            assert payload["translate_configured"] is True
+            assert "大语言模型" in payload["glossary"]
+            assert "英文=中文" in payload["glossary"]
 
-        run("配置接口含批量上限", test_config)
+        run("配置接口含翻译状态与术语表", test_config)
 
         def test_formats():
             status, payload, _ = json_request("GET", "/api/formats")
@@ -521,6 +686,9 @@ def main() -> int:
             assert "批量处理" in text and "batch-dropzone" in text
             assert "compress-confirm-dialog" in text and "pdf-grid" in text
             assert "merge-mode" in text and "pdf-jpg-btn" in text
+            assert "translate-dropzone" in text and "translate-modes" in text
+            assert "translate-config-warning" in text and "scan-dropzone" in text
+            assert "scan-compare" in text and "scan-result" in text
             assert "app.js" in text and "app.css" in text
             status, _, css = http_request("GET", "/static/app.css")
             assert status == 200 and len(css) > 1000
@@ -1187,7 +1355,196 @@ def main() -> int:
 
         run("JPG 上限无法达成时明确报错", test_pdf_to_jpg_too_small_limit)
 
+        def test_translate_bilingual():
+            task_id = submit_translate(
+                "english.pdf",
+                samples["english"].read_bytes(),
+                "bilingual",
+                glossary="large language model=大语言模型\n",
+            )
+            payload, messages, percents = poll_task_tracked(task_id)
+            result = payload["result"]
+            assert result["filename"] == "english_中英对照.docx"
+            assert "术语" in result["note"]
+            assert any("正在翻译第" in item and "/" in item for item in messages), messages
+            assert max(percents) >= 40
+            status, _, content = http_request("GET", result["download_url"])
+            assert status == 200
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                document_xml = archive.read("word/document.xml").decode("utf-8", "replace")
+            assert document_xml.count("<w:tbl>") == 1
+            assert "Section 1.1." in document_xml
+            assert "译文" in document_xml
+            assert "大语言模型" in MockChatHandler.last_system
+            assert "只输出译文" in MockChatHandler.last_system
+
+        run("翻译：中英对照 DOCX + 术语表 + 真实进度", test_translate_bilingual)
+
+        def test_translate_translated():
+            task_id = submit_translate("english.pdf", samples["english"].read_bytes(), "translated")
+            payload, _, _ = poll_task_tracked(task_id)
+            result = payload["result"]
+            assert result["filename"] == "english_译文.docx"
+            status, _, content = http_request("GET", result["download_url"])
+            assert status == 200
+            with zipfile.ZipFile(io.BytesIO(content)) as archive:
+                document_xml = archive.read("word/document.xml").decode("utf-8", "replace")
+            assert "<w:tbl>" not in document_xml
+            assert document_xml.count("译文") >= 6
+            assert "Section 1.1." not in document_xml
+
+        run("翻译：纯译文 DOCX", test_translate_translated)
+
+        def test_translate_layout():
+            task_id = submit_translate("english.pdf", samples["english"].read_bytes(), "layout")
+            payload, _, _ = poll_task_tracked(task_id)
+            result = payload["result"]
+            assert result["filename"] == "english_版式译文.pdf"
+            status, _, content = http_request("GET", result["download_url"])
+            assert status == 200 and content.startswith(b"%PDF")
+            document = fitz.open(stream=content, filetype="pdf")
+            try:
+                assert document.page_count == 3
+                text = "\n".join(page.get_text() for page in document)
+            finally:
+                document.close()
+            assert "译文" in text
+            assert "Section 1.1." not in text
+            assert "嵌入字体" in result["note"]
+
+        run("翻译：保留版式 PDF 原位覆盖", test_translate_layout)
+
+        def test_translate_layout_docx_rejected():
+            body, content_type = multipart_named(
+                {"target_lang": "zh", "mode": "layout", "glossary": ""},
+                [
+                    (
+                        "烟雾测试.docx",
+                        samples["docx"].read_bytes(),
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                    )
+                ],
+                field_name="file",
+            )
+            status, _, response = http_request(
+                "POST",
+                "/api/translate",
+                data=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            assert status == 400
+            payload = json.loads(response.decode("utf-8"))
+            assert payload["error"] == "保留版式输出只支持 PDF，请先用格式转换转成 PDF"
+
+        run("翻译：保留版式拒绝 DOCX（400）", test_translate_layout_docx_rejected)
+
+        def test_translate_without_key():
+            global BASE_URL
+            no_key_port = pick_port()
+            no_key_log = temp_dir / "no-key-server.log"
+            no_key_env = env.copy()
+            no_key_env.update(
+                {
+                    "PORT": str(no_key_port),
+                    "TRANSLATE_API_KEY": "",
+                    "TRANSLATE_BASE_URL": "",
+                    "TRANSLATE_MODEL": "",
+                }
+            )
+            handle = no_key_log.open("wb")
+            no_key_process = subprocess.Popen(
+                [str(PYTHON), str(ROOT / "main.py")],
+                cwd=str(ROOT),
+                env=no_key_env,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                creationflags=creationflags,
+            )
+            previous = BASE_URL
+            BASE_URL = f"http://127.0.0.1:{no_key_port}"
+            try:
+                deadline = time.time() + 25
+                ready = False
+                while time.time() < deadline:
+                    if no_key_process.poll() is not None:
+                        break
+                    try:
+                        status, payload, _ = json_request("GET", "/api/health", timeout=3)
+                        if status == 200 and payload.get("status") == "ok":
+                            ready = True
+                            break
+                    except Exception:
+                        pass
+                    time.sleep(0.25)
+                assert ready, "无密钥服务未启动"
+                status, config, _ = json_request("GET", "/api/config")
+                assert status == 200 and config["translate_configured"] is False
+                body, content_type = multipart_named(
+                    {"target_lang": "zh", "mode": "bilingual", "glossary": ""},
+                    [("smoke.pdf", samples["pdf"].read_bytes(), "application/pdf")],
+                    field_name="file",
+                )
+                status, _, response = http_request(
+                    "POST",
+                    "/api/translate",
+                    data=body,
+                    headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+                )
+                assert status == 400
+                payload = json.loads(response.decode("utf-8"))
+                assert payload["error"] == "未配置翻译密钥，请在 .env 里填写 TRANSLATE_API_KEY"
+            finally:
+                BASE_URL = previous
+                if no_key_process.poll() is None:
+                    no_key_process.terminate()
+                    try:
+                        no_key_process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        no_key_process.kill()
+                        no_key_process.wait(timeout=5)
+                handle.close()
+
+        run("翻译：未配置密钥返回 400", test_translate_without_key)
+
+        def test_scan_photo():
+            task_id = submit_scan("photo.jpg", samples["photo"].read_bytes())
+            payload, messages, percents = poll_task_tracked(task_id)
+            result = payload["result"]
+            assert result["filename"] == "photo_扫描增强.png"
+            status, _, content = http_request("GET", result["download_url"])
+            assert status == 200 and content.startswith(b"\x89PNG")
+            output = Image.open(io.BytesIO(content))
+            try:
+                assert output.width > 300 and output.height > 300
+                assert output.mode in {"RGB", "RGBA", "L"}
+            finally:
+                output.close()
+            assert "未检测到纸张边界" not in result["note"], result["note"]
+            assert max(percents) >= 40
+
+        run("扫描件增强：倾斜 + 阴影照片", test_scan_photo)
+
+        def test_scan_rejects_pdf():
+            body, content_type = multipart_named(
+                {},
+                [("smoke.pdf", samples["pdf"].read_bytes(), "application/pdf")],
+                field_name="file",
+            )
+            status, _, response = http_request(
+                "POST",
+                "/api/scan-photo",
+                data=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            assert status == 415
+            payload = json.loads(response.decode("utf-8"))
+            assert "不支持" in payload["error"]
+
+        run("扫描件增强：非图片返回 415", test_scan_rejects_pdf)
+
     finally:
+        mock_server.shutdown()
+        mock_server.server_close()
         if process.poll() is None:
             process.terminate()
             try:

@@ -11,4 +11,7 @@ xlrd>=2.0,<3
 mammoth>=1.8,<2
 markdown>=3.6,<4
 reportlab>=4.2,<5
+requests>=2.32,<3
+opencv-python-headless>=4.10,<6
+numpy>=1.26,<3
 pywin32>=306; sys_platform == "win32"
