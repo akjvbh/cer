@@ -13,8 +13,9 @@ import threading
 import time
 import uuid
 import webbrowser
+import zipfile
 from contextlib import asynccontextmanager
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote
@@ -53,6 +54,9 @@ def _env_int(name: str, default: int) -> int:
 
 MAX_FILE_SIZE_MB = max(1, _env_int("MAX_FILE_SIZE_MB", 200))
 MAX_FILE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024
+MAX_BATCH_FILES = max(1, _env_int("MAX_BATCH_FILES", 200))
+MAX_BATCH_SIZE_MB = max(1, _env_int("MAX_BATCH_SIZE_MB", 500))
+MAX_BATCH_BYTES = MAX_BATCH_SIZE_MB * 1024 * 1024
 TASK_TTL_SECONDS = max(60, _env_int("TASK_TTL_SECONDS", 3600))
 CLEANUP_INTERVAL_SECONDS = max(60, _env_int("CLEANUP_INTERVAL_SECONDS", 600))
 VERSION = "0.2.0"
@@ -60,6 +64,7 @@ VERSION = "0.2.0"
 TASKS: dict[str, dict[str, Any]] = {}
 TASK_LOCK = threading.RLock()
 EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="convert")
+BATCH_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="batch")
 ILLEGAL_FILENAME = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
 
@@ -120,6 +125,7 @@ async def lifespan(app: FastAPI):
     )
     yield
     EXECUTOR.shutdown(wait=False, cancel_futures=True)
+    BATCH_EXECUTOR.shutdown(wait=False, cancel_futures=True)
 
 
 app = FastAPI(title="文档工坊", version=VERSION, lifespan=lifespan)
@@ -229,7 +235,12 @@ def _magic_ok(ext: str, head: bytes) -> bool:
     return True
 
 
-async def _save_upload(upload: UploadFile, allowed_exts: set[str]) -> tuple[Path, str, int]:
+async def _save_upload(
+    upload: UploadFile,
+    allowed_exts: set[str],
+    max_bytes: int | None = None,
+    limit_message: str | None = None,
+) -> tuple[Path, str, int]:
     display = _sanitize_filename(upload.filename)
     ext = _extension(display)
     if not ext:
@@ -237,6 +248,8 @@ async def _save_upload(upload: UploadFile, allowed_exts: set[str]) -> tuple[Path
     if ext not in allowed_exts:
         raise ApiError(415, f"不支持 .{ext} 文件，请检查支持的格式列表")
 
+    limit = MAX_FILE_BYTES if max_bytes is None else max(1, max_bytes)
+    over_limit_message = limit_message or f"文件超过 {MAX_FILE_SIZE_MB}MB 上限"
     UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
     destination = UPLOADS_DIR / f"{uuid.uuid4().hex}.{ext}"
     total = 0
@@ -248,8 +261,8 @@ async def _save_upload(upload: UploadFile, allowed_exts: set[str]) -> tuple[Path
                 if not chunk:
                     break
                 total += len(chunk)
-                if total > MAX_FILE_BYTES:
-                    raise ApiError(413, f"文件超过 {MAX_FILE_SIZE_MB}MB 上限")
+                if total > limit:
+                    raise ApiError(413, over_limit_message)
                 if len(head) < 8192:
                     head.extend(chunk[: 8192 - len(head)])
                 handle.write(chunk)
@@ -272,7 +285,7 @@ async def _save_upload(upload: UploadFile, allowed_exts: set[str]) -> tuple[Path
     return destination, display, total
 
 
-def _new_task(task_id: str, display: str, size: int) -> dict[str, Any]:
+def _new_task(task_id: str, display: str, size: int, **extra: Any) -> dict[str, Any]:
     task = {
         "task_id": task_id,
         "status": "pending",
@@ -285,7 +298,9 @@ def _new_task(task_id: str, display: str, size: int) -> dict[str, Any]:
         "source_size": size,
         "_path": None,
         "_download_name": None,
+        "_batch_files": {},
     }
+    task.update(extra)
     with TASK_LOCK:
         TASKS[task_id] = task
     return task
@@ -312,11 +327,44 @@ def _public_task(task: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _rename_zip_members(path: Path, old_prefix: str, new_prefix: str) -> None:
+    """把 ZIP 内以临时文件名为前缀的成员改成用户文件名，避免暴露 UUID。"""
+    if not old_prefix or old_prefix == new_prefix:
+        return
+    temp = path.with_name(f".{path.stem}_rename.zip")
+    try:
+        rewritten = False
+        with zipfile.ZipFile(path) as source:
+            infos = source.infolist()
+            if not any(info.filename.startswith(f"{old_prefix}_") for info in infos):
+                return
+            with zipfile.ZipFile(temp, "w", zipfile.ZIP_DEFLATED) as target:
+                for info in infos:
+                    name = info.filename
+                    if name.startswith(f"{old_prefix}_"):
+                        name = f"{new_prefix}{name[len(old_prefix):]}"
+                    if info.is_dir():
+                        target.writestr(name, b"")
+                        continue
+                    target_info = zipfile.ZipInfo(name, date_time=info.date_time)
+                    target_info.compress_type = zipfile.ZIP_DEFLATED
+                    target_info.external_attr = info.external_attr
+                    with source.open(info) as reader, target.open(target_info, "w") as writer:
+                        shutil.copyfileobj(reader, writer)
+            rewritten = True
+        if rewritten:
+            temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
 def _finalize_output(output: Path, display: str, target: str, task_id: str) -> Path:
     stem = _safe_stem(display)
     suffix = output.suffix.lower()
-    if suffix == ".zip" and target == "jpg":
-        name = f"{stem}_jpg.zip"
+    if suffix == ".zip":
+        _rename_zip_members(output, output.stem, stem)
+    if suffix == ".zip" and target in {"jpg", "png"}:
+        name = f"{stem}_{target}.zip"
     elif suffix == ".zip":
         name = f"{stem}.zip"
     else:
@@ -371,6 +419,170 @@ def _run_conversion(task_id: str, src: Path, display: str, target: str) -> None:
         src.unlink(missing_ok=True)
 
 
+def _batch_result(
+    filename: str,
+    ok: bool,
+    download_url: str = "",
+    error: str = "",
+    note: str = "",
+) -> dict[str, Any]:
+    return {
+        "filename": filename,
+        "ok": ok,
+        "download_url": download_url,
+        "error": error,
+        "note": note,
+    }
+
+
+def _batch_convert_one(entry: dict[str, Any], task_id: str, target: str) -> dict[str, Any]:
+    index = entry["index"]
+    try:
+        output, note = converter.convert(
+            entry["src"],
+            OUTPUTS_DIR / task_id / f"{index:03d}",
+            target,
+        )
+        final = _finalize_output(output, entry["display"], target, f"{task_id}{index}")
+        return {**entry, "path": final, "note": note, "error": ""}
+    except converter.ConversionError as exc:
+        LOGGER.warning("批量转换失败 task=%s index=%s: %s", task_id, index, exc)
+        return {**entry, "path": None, "note": "", "error": str(exc)}
+    except Exception:
+        LOGGER.exception("批量转换出现未预期错误 task=%s index=%s", task_id, index)
+        return {
+            **entry,
+            "path": None,
+            "note": "",
+            "error": "转换失败，请检查文件是否损坏或稍后重试",
+        }
+    finally:
+        entry["src"].unlink(missing_ok=True)
+
+
+def _unique_arcname(name: str, used: set[str]) -> str:
+    if name not in used:
+        used.add(name)
+        return name
+    stem = Path(name).stem
+    suffix = Path(name).suffix
+    counter = 2
+    while f"{stem} ({counter}){suffix}" in used:
+        counter += 1
+    candidate = f"{stem} ({counter}){suffix}"
+    used.add(candidate)
+    return candidate
+
+
+def _build_batch_zip(task_id: str, entries: list[dict[str, Any]]) -> Path | None:
+    zip_path = OUTPUTS_DIR / task_id / "批量转换结果.zip"
+    used: set[str] = set()
+    written = 0
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for entry in entries:
+            path = entry.get("path")
+            if path is None or not Path(path).exists():
+                continue
+            archive.write(path, _unique_arcname(Path(path).name, used))
+            written += 1
+    if written == 0:
+        zip_path.unlink(missing_ok=True)
+        return None
+    return zip_path
+
+
+def _run_batch(
+    task_id: str,
+    saved: list[dict[str, Any]],
+    total_files: int,
+    target: str,
+    skipped: list[dict[str, Any]],
+) -> None:
+    _update_task(
+        task_id,
+        status="running",
+        progress=2,
+        message=f"正在处理 0/{total_files} 个文件",
+    )
+    results: list[dict[str, Any] | None] = [None] * total_files
+    for item in skipped:
+        results[item["index"]] = _batch_result(item["filename"], False, error=item["error"])
+
+    done_entries: list[dict[str, Any]] = []
+    completed = len(skipped)
+    try:
+        futures = {
+            BATCH_EXECUTOR.submit(_batch_convert_one, entry, task_id, target): entry
+            for entry in saved
+        }
+        for future in as_completed(futures):
+            entry = future.result()
+            path = entry.get("path")
+            results[entry["index"]] = _batch_result(
+                entry["display"],
+                path is not None,
+                f"/api/download/{task_id}?file={entry['index']}" if path is not None else "",
+                entry["error"],
+                entry["note"],
+            )
+            if path is not None:
+                done_entries.append(entry)
+            completed += 1
+            progress = min(98, 2 + int(completed * 96 / total_files))
+            _update_task(
+                task_id,
+                progress=progress,
+                message=f"已完成 {completed}/{total_files} 个文件",
+            )
+    except Exception:
+        LOGGER.exception("批量任务异常 task=%s", task_id)
+        for entry in saved:
+            entry["src"].unlink(missing_ok=True)
+        shutil.rmtree(OUTPUTS_DIR / task_id, ignore_errors=True)
+        _update_task(
+            task_id,
+            status="error",
+            progress=100,
+            message="批量处理失败",
+            error="批量处理失败，请重试或减少文件数量",
+        )
+        return
+
+    actual_results = [item for item in results if item is not None]
+    success_files = sum(1 for item in actual_results if item["ok"])
+    failed_files = total_files - success_files
+
+    zip_path: Path | None = None
+    if done_entries:
+        try:
+            zip_path = _build_batch_zip(task_id, done_entries)
+        except Exception:
+            LOGGER.exception("批量结果打包失败 task=%s", task_id)
+
+    batch_files = {
+        entry["index"]: (str(entry["path"]), Path(entry["path"]).name)
+        for entry in done_entries
+        if entry.get("path") is not None
+    }
+    result = {
+        "total_files": total_files,
+        "success_files": success_files,
+        "failed_files": failed_files,
+        "results": actual_results,
+    }
+    message = f"批量完成：成功 {success_files}，失败 {failed_files}"
+    _update_task(
+        task_id,
+        status="done",
+        progress=100,
+        message=message,
+        result=result,
+        _path=str(zip_path) if zip_path is not None else None,
+        _download_name=zip_path.name if zip_path is not None else None,
+        _batch_files=batch_files,
+    )
+
+
 # ---------------------------------------------------------------------------
 # 接口
 # ---------------------------------------------------------------------------
@@ -390,6 +602,8 @@ def health():
     return {
         "status": "ok",
         "office": converter.office_available(),
+        "excel": converter.excel_available(),
+        "powerpoint": converter.powerpoint_available(),
         "python": platform.python_version(),
         "version": VERSION,
     }
@@ -410,6 +624,8 @@ def config():
             LOGGER.warning("读取术语表失败", exc_info=True)
     return {
         "max_file_size_mb": MAX_FILE_SIZE_MB,
+        "max_batch_files": MAX_BATCH_FILES,
+        "max_batch_size_mb": MAX_BATCH_SIZE_MB,
         "translate_configured": bool(os.getenv("TRANSLATE_API_KEY", "").strip()),
         "glossary": glossary,
     }
@@ -444,6 +660,101 @@ async def convert_api(file: UploadFile = File(...), target: str = Form(...)):
     }
 
 
+@app.post("/api/batch")
+async def batch_api(
+    files: list[UploadFile] = File(...),
+    mode: str = Form("convert"),
+    target: str = Form(""),
+):
+    mode = (mode or "convert").strip().lower()
+    if mode != "convert":
+        for upload in files:
+            await upload.close()
+        raise ApiError(400, "当前阶段仅支持批量格式转换，批量压缩将在后续开放")
+    if not files:
+        raise ApiError(400, "请至少选择一个文件")
+    if len(files) > MAX_BATCH_FILES:
+        for upload in files:
+            await upload.close()
+        raise ApiError(413, f"批量最多支持 {MAX_BATCH_FILES} 个文件，当前 {len(files)} 个")
+
+    requested = target.strip().lower().lstrip(".")
+    if not requested:
+        for upload in files:
+            await upload.close()
+        raise ApiError(400, "请选择批量转换的目标格式")
+
+    all_formats = converter.get_formats()
+    allowed = set(all_formats)
+    saved: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    total_bytes = 0
+    try:
+        for index, upload in enumerate(files):
+            display = _sanitize_filename(upload.filename)
+            ext = _extension(display)
+            declared = int(upload.size or 0)
+            reason = ""
+            if ext not in all_formats:
+                reason = f"不支持 .{ext or '未知'} 文件"
+            elif requested not in all_formats[ext]:
+                reason = f"该格式不支持转换为 {requested.upper()}"
+            elif declared > MAX_FILE_BYTES:
+                reason = f"文件超过 {MAX_FILE_SIZE_MB}MB 上限"
+            elif declared and total_bytes + declared > MAX_BATCH_BYTES:
+                raise ApiError(413, f"批量文件总量超过 {MAX_BATCH_SIZE_MB}MB 上限")
+
+            if reason:
+                skipped.append({"index": index, "filename": display, "error": reason})
+                await upload.close()
+                continue
+
+            remaining = MAX_BATCH_BYTES - total_bytes
+            limit = min(MAX_FILE_BYTES, remaining)
+            try:
+                src, display, size = await _save_upload(
+                    upload,
+                    allowed,
+                    max_bytes=limit,
+                    limit_message=(
+                        f"批量文件总量超过 {MAX_BATCH_SIZE_MB}MB 上限"
+                        if limit < MAX_FILE_BYTES
+                        else f"文件超过 {MAX_FILE_SIZE_MB}MB 上限"
+                    ),
+                )
+            except ApiError as exc:
+                if limit < MAX_FILE_BYTES and exc.status_code == 413:
+                    raise
+                skipped.append({"index": index, "filename": display, "error": exc.message})
+                continue
+            total_bytes += size
+            saved.append({"index": index, "src": src, "display": display, "size": size})
+    except ApiError:
+        for item in saved:
+            item["src"].unlink(missing_ok=True)
+        for upload in files:
+            await upload.close()
+        raise
+    except Exception:
+        for item in saved:
+            item["src"].unlink(missing_ok=True)
+        LOGGER.exception("批量上传处理失败")
+        for upload in files:
+            await upload.close()
+        raise ApiError(500, "批量上传处理失败，请重试") from None
+
+    task_id = uuid.uuid4().hex
+    _new_task(
+        task_id,
+        f"批量 {len(files)} 个文件",
+        total_bytes,
+        total_files=len(files),
+        target=requested,
+    )
+    EXECUTOR.submit(_run_batch, task_id, saved, len(files), requested, skipped)
+    return {"task_id": task_id}
+
+
 @app.get("/api/tasks/{task_id}")
 def task_status(task_id: str):
     with TASK_LOCK:
@@ -454,7 +765,7 @@ def task_status(task_id: str):
 
 
 @app.get("/api/download/{task_id}")
-def download(task_id: str):
+def download(task_id: str, file: int | None = None):
     with TASK_LOCK:
         task = TASKS.get(task_id)
         if task is None:
@@ -463,12 +774,23 @@ def download(task_id: str):
             raise ApiError(409, task["error"] or "任务转换失败")
         if task["status"] != "done":
             raise ApiError(409, "任务尚未完成，请稍后再试")
-        path = Path(task["_path"]) if task["_path"] else None
-        filename = task["_download_name"] or (path.name if path else "download")
-    if path is None or not path.exists():
+        if file is not None:
+            entry = (task.get("_batch_files") or {}).get(file)
+            if entry is None:
+                raise ApiError(404, "指定的文件不存在或转换失败")
+            path = Path(entry[0])
+            filename = entry[1]
+        else:
+            path = Path(task["_path"]) if task["_path"] else None
+            filename = task["_download_name"] or (path.name if path else "download")
+    if path is None:
+        raise ApiError(404, "没有可下载的结果文件")
+    if not path.exists():
         raise ApiError(404, "结果文件已过期或被清理")
 
-    media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    media_type = "application/zip" if path.suffix.lower() == ".zip" else (
+        mimetypes.guess_type(filename)[0] or "application/octet-stream"
+    )
     ascii_name = f"download{path.suffix}"
     encoded = quote(filename)
     headers = {
@@ -495,7 +817,7 @@ if __name__ == "__main__":
             try:
                 stream.reconfigure(encoding="utf-8", errors="replace")
             except Exception:
-                pass
+                LOGGER.debug("重设标准输出编码失败", exc_info=True)
     port = _env_int("PORT", 8000)
     if os.getenv("AUTO_OPEN_BROWSER", "0") == "1":
         threading.Thread(target=_open_browser_later, args=(port,), daemon=True).start()

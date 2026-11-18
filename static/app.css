@@ -1139,6 +1139,513 @@ a {
     font-weight: 700;
 }
 
+.batch-panel {
+    margin-top: 28px;
+}
+
+.batch-dropzone {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 196px;
+    padding: 26px 20px;
+    border: 1.5px dashed var(--line-strong);
+    border-radius: var(--radius-lg);
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--accent) 3%, transparent), transparent 60%),
+        var(--panel-2);
+    text-align: center;
+    cursor: pointer;
+    transition: border-color 0.2s ease, background 0.2s ease, transform 0.2s ease;
+}
+
+.batch-dropzone:hover,
+.batch-dropzone:focus-visible,
+.batch-dropzone.dragover {
+    border-color: var(--accent);
+    background:
+        linear-gradient(180deg, color-mix(in srgb, var(--accent) 9%, transparent), transparent 70%),
+        var(--panel-2);
+}
+
+.batch-dropzone.dragover {
+    transform: scale(1.005);
+}
+
+.batch-dropzone.is-disabled {
+    opacity: 0.62;
+    pointer-events: none;
+}
+
+.batch-drop-actions {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 9px;
+    margin-top: 15px;
+}
+
+.secondary-button {
+    padding: 7px 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    background: var(--panel);
+    color: var(--text);
+    font-size: 12px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: border-color 0.18s ease, color 0.18s ease, background 0.18s ease;
+}
+
+.secondary-button:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--accent) 55%, var(--line));
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+}
+
+.secondary-button:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.batch-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 16px;
+}
+
+.batch-stats {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 1.6;
+}
+
+.batch-stats strong {
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+}
+
+.batch-actions {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: 0 0 auto;
+}
+
+.batch-actions .ghost-button {
+    padding: 8px 12px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+}
+
+.batch-actions .primary-button {
+    width: auto;
+    min-width: 158px;
+    height: 42px;
+    margin-top: 0;
+    padding: 0 18px;
+}
+
+.batch-progress {
+    margin: 16px 0 0;
+}
+
+.batch-summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    margin-top: 16px;
+    padding: 14px 16px;
+    border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line));
+    border-radius: 14px;
+    background: color-mix(in srgb, var(--accent-soft) 62%, var(--panel));
+}
+
+.batch-summary-copy {
+    min-width: 0;
+}
+
+.batch-summary-copy strong {
+    display: block;
+    font-size: 13.5px;
+}
+
+.batch-summary-copy p {
+    margin: 3px 0 0;
+    color: var(--muted);
+    font-size: 11.5px;
+    line-height: 1.5;
+}
+
+.batch-summary-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 0 0 auto;
+}
+
+.batch-groups {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    margin-top: 16px;
+}
+
+.batch-group {
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--panel-2);
+}
+
+.batch-group-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 14px 16px 12px;
+}
+
+.group-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+}
+
+.group-title .file-icon {
+    width: 38px;
+    height: 38px;
+    border-radius: 10px;
+    font-size: 9px;
+}
+
+.group-title h3 {
+    margin: 0;
+    font-size: 13.5px;
+    font-weight: 700;
+}
+
+.group-title p {
+    margin: 2px 0 0;
+    overflow: hidden;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 10.5px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.group-control {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: 0 0 auto;
+}
+
+.group-control select {
+    height: 34px;
+    padding: 0 28px 0 10px;
+    border: 1px solid var(--line-strong);
+    border-radius: 9px;
+    outline: none;
+    background: var(--panel);
+    color: var(--text);
+    font-size: 11.5px;
+    cursor: pointer;
+}
+
+.group-control select:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.group-control select:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+}
+
+.batch-status {
+    padding: 3px 9px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.batch-status[data-state="uploading"],
+.batch-status[data-state="running"] {
+    border-color: color-mix(in srgb, var(--accent) 24%, var(--line));
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    animation: pulse 1.5s ease-in-out infinite;
+}
+
+.batch-status[data-state="done"] {
+    border-color: color-mix(in srgb, var(--success) 24%, var(--line));
+    background: var(--success-soft);
+    color: var(--success);
+}
+
+.batch-status[data-state="partial"],
+.batch-status[data-state="error"] {
+    border-color: color-mix(in srgb, var(--danger) 24%, var(--line));
+    background: var(--danger-soft);
+    color: var(--danger);
+}
+
+.batch-group-progress {
+    height: 3px;
+    overflow: hidden;
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+
+.batch-group-progress > div {
+    width: 0;
+    height: 100%;
+    background: linear-gradient(90deg, var(--accent), var(--accent-2));
+    transition: width 0.35s ease;
+}
+
+.batch-rows {
+    margin: 0;
+    padding: 2px 16px 6px;
+    list-style: none;
+}
+
+.batch-row {
+    display: grid;
+    grid-template-columns: 34px minmax(0, 1fr) auto;
+    align-items: start;
+    gap: 10px;
+    padding: 9px 0;
+    border-bottom: 1px solid var(--line);
+}
+
+.batch-row:last-child {
+    border-bottom: 0;
+}
+
+.row-ext {
+    display: grid;
+    place-items: center;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    color: var(--accent-ink);
+    background: var(--accent-soft);
+    font-family: var(--mono);
+    font-size: 8px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+}
+
+.row-ext.kind-pdf {
+    color: var(--danger);
+    background: var(--danger-soft);
+}
+
+.row-ext.kind-image {
+    color: var(--success);
+    background: var(--success-soft);
+}
+
+.row-ext.kind-text {
+    color: var(--warning);
+    background: var(--warning-soft);
+}
+
+.row-main {
+    min-width: 0;
+}
+
+.row-name {
+    margin: 0;
+    overflow: hidden;
+    font-size: 12.5px;
+    font-weight: 600;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.row-meta {
+    margin: 2px 0 0;
+    color: var(--faint);
+    font-family: var(--mono);
+    font-size: 9.5px;
+}
+
+.row-error,
+.row-note {
+    margin: 4px 0 0;
+    font-size: 10.5px;
+    line-height: 1.5;
+    overflow-wrap: anywhere;
+}
+
+.row-error {
+    color: var(--danger);
+}
+
+.row-note {
+    color: var(--warning);
+}
+
+.row-actions {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-wrap: wrap;
+    padding-top: 2px;
+}
+
+.row-state {
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--panel);
+    color: var(--faint);
+    font-size: 9.5px;
+    font-weight: 650;
+    white-space: nowrap;
+}
+
+.row-state.state-processing {
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+}
+
+.row-state.state-success {
+    background: var(--success-soft);
+    color: var(--success);
+}
+
+.row-state.state-failed {
+    background: var(--danger-soft);
+    color: var(--danger);
+}
+
+.row-download {
+    padding: 3px 7px;
+    border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line));
+    border-radius: 7px;
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    font-size: 9.5px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+}
+
+.row-download:hover {
+    background: var(--accent);
+    color: #ffffff;
+}
+
+.batch-group-foot {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    padding: 9px 16px;
+    border-top: 1px solid var(--line);
+    background: var(--panel);
+}
+
+.group-message {
+    flex: 1;
+    min-width: 140px;
+    margin: 0;
+    color: var(--faint);
+    font-size: 10.5px;
+    line-height: 1.5;
+}
+
+.batch-group.invalid {
+    border-color: color-mix(in srgb, var(--danger) 22%, var(--line));
+}
+
+.batch-group.invalid .group-title .file-icon {
+    color: var(--danger);
+    background: var(--danger-soft);
+}
+
+.batch-empty {
+    min-height: 220px;
+    margin-top: 16px;
+}
+
+@media (max-width: 760px) {
+    .batch-toolbar,
+    .batch-summary {
+        align-items: stretch;
+        flex-direction: column;
+    }
+
+    .batch-actions {
+        width: 100%;
+    }
+
+    .batch-actions .primary-button {
+        flex: 1;
+    }
+
+    .batch-summary-actions {
+        flex-wrap: wrap;
+    }
+
+    .batch-group-head {
+        align-items: flex-start;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .group-control {
+        width: 100%;
+    }
+
+    .group-control select {
+        flex: 1;
+    }
+
+    .batch-row {
+        grid-template-columns: 32px minmax(0, 1fr);
+    }
+
+    .row-actions {
+        grid-column: 2;
+        justify-content: flex-start;
+    }
+}
+
+@media (max-width: 560px) {
+    .batch-drop-actions {
+        width: 100%;
+    }
+
+    .batch-drop-actions .secondary-button {
+        flex: 1;
+    }
+
+    .batch-actions {
+        flex-direction: column-reverse;
+    }
+
+    .batch-actions .primary-button,
+    .batch-actions .ghost-button {
+        width: 100%;
+    }
+}
+
 .toast-stack {
     position: fixed;
     right: 22px;

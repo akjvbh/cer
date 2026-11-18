@@ -64,7 +64,7 @@
                         </svg>
                     </span>
                     <span class="nav-text">批量处理</span>
-                    <span class="nav-badge">阶段 2</span>
+                    <span class="nav-badge ready">可用</span>
                 </button>
                 <button class="nav-item" type="button" data-page="compress">
                     <span class="nav-icon" aria-hidden="true">
@@ -225,19 +225,100 @@
                     <div>
                         <p class="eyebrow">BATCH PROCESSING</p>
                         <h1>一次处理一整批文件</h1>
-                        <p class="page-lead">多选文件、按源格式分组、逐条显示状态，失败项可以单独重试。</p>
+                        <p class="page-lead">多选文件或整个文件夹，按扩展名自动分组；每组独立选择目标格式并并行提交，失败项可集中重试。</p>
                     </div>
                     <div class="heading-mark" aria-hidden="true">02</div>
                 </div>
-                <div class="coming-card">
-                    <span class="coming-tag">阶段 2 · 即将上线</span>
-                    <h2>批量队列准备好了，正在接线</h2>
-                    <p>这一版先把单文件主干打通。下一阶段会接入多选与文件夹拖拽、分组目标格式、失败清单和重试。</p>
-                    <ul class="feature-list">
-                        <li>整文件夹拖入，按扩展名自动分组</li>
-                        <li>每组独立选择目标格式，并行提交</li>
-                        <li>成功文件打包 ZIP，失败项保留可复制原因</li>
-                    </ul>
+
+                <section class="panel batch-panel">
+                    <div class="panel-head">
+                        <h2>批量文件</h2>
+                        <span class="panel-tag" id="batch-count">0 个</span>
+                    </div>
+
+                    <div class="batch-dropzone" id="batch-dropzone" role="button" tabindex="0" aria-label="选择或拖入多个文件或文件夹">
+                        <div class="dropzone-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M12 16V4M7.5 8.5 12 4l4.5 4.5"></path>
+                                <path d="M4 15.5V19h16v-3.5"></path>
+                            </svg>
+                        </div>
+                        <p class="dropzone-title">拖入多个文件，或整个文件夹</p>
+                        <p class="dropzone-sub" id="batch-dropzone-sub">按扩展名自动分组 · 支持 Word / PDF / Excel / 图片 / Markdown / TXT</p>
+                        <div class="batch-drop-actions">
+                            <button class="secondary-button" type="button" id="batch-pick-files">选择文件</button>
+                            <button class="secondary-button" type="button" id="batch-pick-folder">选择文件夹</button>
+                        </div>
+                        <input type="file" id="batch-file-input" multiple hidden>
+                        <input type="file" id="batch-folder-input" webkitdirectory directory multiple hidden>
+                    </div>
+
+                    <p class="office-warning" id="batch-office-warning" hidden>
+                        未检测到完整的 Microsoft Office。DOCX 转 PDF 会使用内置排版引擎；DOC、XLS、PPT 或 Office 精细排版转换可能失败。
+                    </p>
+
+                    <div class="batch-toolbar">
+                        <p class="batch-stats" id="batch-stats">还没有选择文件</p>
+                        <div class="batch-actions">
+                            <button class="ghost-button" type="button" id="batch-clear" disabled>清空</button>
+                            <button class="primary-button" type="button" id="batch-start" disabled>
+                                <span id="batch-start-text">开始批量处理</span>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="M5 12h14M14 7l5 5-5 5"></path>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div class="progress-card" id="batch-progress" hidden aria-live="polite">
+                        <div class="progress-top">
+                            <span id="batch-progress-message">正在准备</span>
+                            <strong id="batch-progress-percent">0%</strong>
+                        </div>
+                        <div class="progress-track">
+                            <div class="progress-bar" id="batch-progress-bar"></div>
+                        </div>
+                        <p class="progress-note">进度按已完成文件数计算；各组并行提交，Office 文件会按队列依次处理。</p>
+                    </div>
+
+                    <div class="batch-summary" id="batch-summary" hidden aria-live="polite">
+                        <div class="batch-summary-copy">
+                            <strong id="batch-summary-title"></strong>
+                            <p id="batch-summary-detail"></p>
+                        </div>
+                        <div class="batch-summary-actions">
+                            <button class="copy-button" type="button" id="batch-copy-failures">复制失败清单</button>
+                            <button class="secondary-button" type="button" id="batch-retry">重试失败项</button>
+                        </div>
+                    </div>
+
+                    <div class="batch-groups" id="batch-groups"></div>
+
+                    <div class="empty-state batch-empty" id="batch-empty">
+                        <div class="empty-icon" aria-hidden="true">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                <path d="M4 7h16v13H4z"></path>
+                                <path d="M8 7V4h8v3M8 12h8M8 16h5"></path>
+                            </svg>
+                        </div>
+                        <p>批量队列还是空的</p>
+                        <span>选择多个文件或拖入文件夹后，会按扩展名自动分组。</span>
+                    </div>
+                </section>
+
+                <div class="tip-strip">
+                    <div class="tip-item">
+                        <span class="tip-number">01</span>
+                        <div><strong>按格式分组</strong><p>同一扩展名归为一组，每组只选一个目标格式。</p></div>
+                    </div>
+                    <div class="tip-item">
+                        <span class="tip-number">02</span>
+                        <div><strong>失败隔离</strong><p>单个文件失败不影响其它文件，失败原因可复制。</p></div>
+                    </div>
+                    <div class="tip-item">
+                        <span class="tip-number">03</span>
+                        <div><strong>ZIP 打包</strong><p>每组成功结果自动打包，重名文件会加序号。</p></div>
+                    </div>
                 </div>
             </section>
 
