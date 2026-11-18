@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="description" content="文档工坊：本机运行的 Word、PDF、图片等多格式文档转换工具。">
+    <title>文档工坊 · 本地文档转换器</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232f63f4'/%3E%3Cpath d='M20 16h17l9 9v23H20z' fill='white'/%3E%3Cpath d='M37 16v9h9' fill='%23cfdcff'/%3E%3Cpath d='M25 33h15M25 39h15' stroke='%232f63f4' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
+    <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<div class="app-shell">
+    <header class="topbar">
+        <div class="brand">
+            <div class="brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M6 3.5h8l4 4v13H6z"></path>
+                    <path d="M14 3.5v4h4"></path>
+                    <path d="M9 12h6M9 15.5h6"></path>
+                </svg>
+            </div>
+            <div class="brand-copy">
+                <span class="brand-name">文档工坊</span>
+                <span class="brand-sub">本地办公文档处理台</span>
+            </div>
+        </div>
+        <div class="topbar-actions">
+            <div class="status-pill" id="health-badge" data-state="loading" title="正在检测本机环境">
+                <span class="status-dot" aria-hidden="true"></span>
+                <span id="health-text">正在检测环境</span>
+            </div>
+            <button class="icon-button" id="theme-toggle" type="button" aria-label="切换深色或浅色主题" title="切换主题">
+                <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+                    <circle cx="12" cy="12" r="4"></circle>
+                    <path d="M12 2.5v2M12 19.5v2M4.6 4.6l1.4 1.4M18 18l1.4 1.4M2.5 12h2M19.5 12h2M4.6 19.4L6 18M18 6l1.4-1.4"></path>
+                </svg>
+                <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                    <path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"></path>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <div class="layout">
+        <aside class="sidebar">
+            <p class="nav-label">工作台</p>
+            <nav class="nav" id="nav" aria-label="功能导航">
+                <button class="nav-item active" type="button" data-page="convert">
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M4 8h13M13 4l4 4-4 4"></path>
+                            <path d="M20 16H7M11 12l-4 4 4 4"></path>
+                        </svg>
+                    </span>
+                    <span class="nav-text">格式转换</span>
+                    <span class="nav-badge ready">可用</span>
+                </button>
+                <button class="nav-item" type="button" data-page="batch">
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M12 3 3 8l9 5 9-5-9-5z"></path>
+                            <path d="m3 12 9 5 9-5"></path>
+                            <path d="m3 16 9 5 9-5"></path>
+                        </svg>
+                    </span>
+                    <span class="nav-text">批量处理</span>
+                    <span class="nav-badge">阶段 2</span>
+                </button>
+                <button class="nav-item" type="button" data-page="compress">
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"></path>
+                            <path d="M9 9 4 4M15 9l5-5M9 15l-5 5M15 15l5 5"></path>
+                        </svg>
+                    </span>
+                    <span class="nav-text">压缩</span>
+                    <span class="nav-badge">阶段 3</span>
+                </button>
+                <button class="nav-item" type="button" data-page="pdf">
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M6 3.5h8l4 4v13H6z"></path>
+                            <path d="M14 3.5v4h4"></path>
+                            <path d="M9 13h6M9 16.5h4"></path>
+                        </svg>
+                    </span>
+                    <span class="nav-text">PDF 工具</span>
+                    <span class="nav-badge">阶段 3</span>
+                </button>
+                <button class="nav-item" type="button" data-page="ai">
+                    <span class="nav-icon" aria-hidden="true">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="m12 3 1.5 4.5L18 9l-4.5 1.5L12 15l-1.5-4.5L6 9l4.5-1.5L12 3z"></path>
+                            <path d="m18.5 14 .8 2.2 2.2.8-2.2.8-.8 2.2-.8-2.2-2.2-.8 2.2-.8.8-2.2z"></path>
+                        </svg>
+                    </span>
+                    <span class="nav-text">AI 增强</span>
+                    <span class="nav-badge">阶段 4</span>
+                </button>
+            </nav>
+            <div class="sidebar-note">
+                <span class="note-dot" aria-hidden="true"></span>
+                <div>
+                    <strong>只在本机处理</strong>
+                    <p>文件不会上传到第三方服务器。</p>
+                </div>
+            </div>
+        </aside>
+
+        <main class="main">
+            <section class="page active" id="page-convert">
+                <div class="page-heading">
+                    <div>
+                        <p class="eyebrow">FORMAT CONVERSION</p>
+                        <h1>把文档，变成你要的格式</h1>
+                        <p class="page-lead">拖入一个文件，选择目标格式。转换在本机完成，完成后直接下载。</p>
+                    </div>
+                    <div class="heading-mark" aria-hidden="true">01</div>
+                </div>
+
+                <div class="workspace">
+                    <section class="panel upload-panel">
+                        <div class="panel-head">
+                            <h2>上传文件</h2>
+                            <span class="panel-tag">单文件</span>
+                        </div>
+
+                        <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="选择或拖入要转换的文件">
+                            <div class="dropzone-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M12 16V4M7.5 8.5 12 4l4.5 4.5"></path>
+                                    <path d="M4 15.5V19h16v-3.5"></path>
+                                </svg>
+                            </div>
+                            <p class="dropzone-title">拖拽文件到这里，或点击选择</p>
+                            <p class="dropzone-sub" id="dropzone-sub">支持 Word / PDF / 图片 / Markdown / TXT</p>
+                            <input type="file" id="file-input" hidden>
+                        </div>
+
+                        <div class="selected-file" id="selected-file" hidden>
+                            <div class="file-icon" id="file-icon">FILE</div>
+                            <div class="file-meta">
+                                <p class="file-name" id="file-name"></p>
+                                <p class="file-size" id="file-size"></p>
+                            </div>
+                            <button class="ghost-button" type="button" id="remove-file">移除</button>
+                        </div>
+
+                        <div class="form-row">
+                            <label for="target-select">目标格式</label>
+                            <div class="select-wrap">
+                                <select id="target-select" disabled>
+                                    <option>请先选择文件</option>
+                                </select>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                    <path d="m7 9 5 5 5-5"></path>
+                                </svg>
+                            </div>
+                            <p class="form-hint" id="target-hint">选择文件后会自动列出可转换的格式</p>
+                        </div>
+
+                        <button class="primary-button" type="button" id="convert-btn" disabled>
+                            <span id="convert-btn-text">开始转换</span>
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                                <path d="M5 12h14M14 7l5 5-5 5"></path>
+                            </svg>
+                        </button>
+
+                        <p class="office-warning" id="office-warning" hidden>
+                            未检测到 Microsoft Word。DOCX 转 PDF 会使用内置排版引擎，字体和行距可能与 Word 略有差异。
+                        </p>
+                    </section>
+
+                    <section class="panel result-panel">
+                        <div class="panel-head">
+                            <h2>转换结果</h2>
+                            <span class="panel-tag" id="result-count">0 个</span>
+                        </div>
+
+                        <div class="progress-card" id="progress-panel" hidden aria-live="polite">
+                            <div class="progress-top">
+                                <span id="progress-message">正在上传</span>
+                                <strong id="progress-percent">0%</strong>
+                            </div>
+                            <div class="progress-track">
+                                <div class="progress-bar" id="progress-bar"></div>
+                            </div>
+                            <p class="progress-note">请保持页面打开，转换完成后结果会出现在下方。</p>
+                        </div>
+
+                        <div class="result-list" id="result-list"></div>
+
+                        <div class="empty-state" id="result-empty">
+                            <div class="empty-icon" aria-hidden="true">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                                    <path d="M7 3.5h7l4 4v13H7z"></path>
+                                    <path d="M14 3.5v4h4"></path>
+                                    <path d="M10 12h5M10 15h3"></path>
+                                </svg>
+                            </div>
+                            <p>结果会出现在这里</p>
+                            <span>选择文件并开始转换后，可在这里下载结果。</span>
+                        </div>
+                    </section>
+                </div>
+
+                <div class="tip-strip">
+                    <div class="tip-item">
+                        <span class="tip-number">01</span>
+                        <div><strong>原文件保留</strong><p>只读取上传副本，不改动你本地的原文件。</p></div>
+                    </div>
+                    <div class="tip-item">
+                        <span class="tip-number">02</span>
+                        <div><strong>自动清理</strong><p>上传与结果文件 1 小时后自动清理。</p></div>
+                    </div>
+                    <div class="tip-item">
+                        <span class="tip-number">03</span>
+                        <div><strong>中文文件名</strong><p>上传、下载全程支持中文文件名。</p></div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="page" id="page-batch" hidden>
+                <div class="page-heading">
+                    <div>
+                        <p class="eyebrow">BATCH PROCESSING</p>
+                        <h1>一次处理一整批文件</h1>
+                        <p class="page-lead">多选文件、按源格式分组、逐条显示状态，失败项可以单独重试。</p>
+                    </div>
+                    <div class="heading-mark" aria-hidden="true">02</div>
+                </div>
+                <div class="coming-card">
+                    <span class="coming-tag">阶段 2 · 即将上线</span>
+                    <h2>批量队列准备好了，正在接线</h2>
+                    <p>这一版先把单文件主干打通。下一阶段会接入多选与文件夹拖拽、分组目标格式、失败清单和重试。</p>
+                    <ul class="feature-list">
+                        <li>整文件夹拖入，按扩展名自动分组</li>
+                        <li>每组独立选择目标格式，并行提交</li>
+                        <li>成功文件打包 ZIP，失败项保留可复制原因</li>
+                    </ul>
+                </div>
+            </section>
+
+            <section class="page" id="page-compress" hidden>
+                <div class="page-heading">
+                    <div>
+                        <p class="eyebrow">COMPRESSION</p>
+                        <h1>在清晰度和体积之间取舍</h1>
+                        <p class="page-lead">四档压缩、压缩前预估，并明确提示 PDF 压缩会丢失文字层。</p>
+                    </div>
+                    <div class="heading-mark" aria-hidden="true">03</div>
+                </div>
+                <div class="coming-card">
+                    <span class="coming-tag">阶段 3 · 即将上线</span>
+                    <h2>四档压缩与体积预估</h2>
+                    <p>PDF 与图片压缩会在阶段 3 接入。PDF 会重渲染为图片，压缩后文字不可再搜索，界面会先弹确认框。</p>
+                    <ul class="feature-list">
+                        <li>80 / 60 / 40 / 20 四档质量</li>
+                        <li>抽样前三页预估大小，不跑整份文件</li>
+                        <li>压缩结果卡片固定注明「丢文字层」</li>
+                    </ul>
+                </div>
+            </section>
+
+            <section class="page" id="page-pdf" hidden>
+                <div class="page-heading">
+                    <div>
+                        <p class="eyebrow">PDF TOOLKIT</p>
+                        <h1>合并、删页、旋转、导出</h1>
+                        <p class="page-lead">页码始终按原文件计算，页面操作全部进入同一个撤销栈。</p>
+                    </div>
+                    <div class="heading-mark" aria-hidden="true">04</div>
+                </div>
+                <div class="coming-card">
+                    <span class="coming-tag">阶段 3 · 即将上线</span>
+                    <h2>可视化 PDF 页面编辑器</h2>
+                    <p>缩略图网格、拖拽排序、复制页、绝对角度旋转，以及逐页 JPG 打包导出，都会在阶段 3 完成。</p>
+                    <ul class="feature-list">
+                        <li>合并支持首尾相接、逐页交替、插入指定页后</li>
+                        <li>导出 JPG 每张控制在 300KB 以内</li>
+                        <li>Ctrl+Z / Ctrl+Shift+Z 撤销与重做</li>
+                    </ul>
+                </div>
+            </section>
+
+            <section class="page" id="page-ai" hidden>
+                <div class="page-heading">
+                    <div>
+                        <p class="eyebrow">AI ASSISTANCE</p>
+                        <h1>翻译文献，也把照片变成扫描件</h1>
+                        <p class="page-lead">逐段翻译保留结构，扫描件增强自动找纸张四角、裁切矫正并去阴影。</p>
+                    </div>
+                    <div class="heading-mark" aria-hidden="true">05</div>
+                </div>
+                <div class="coming-card">
+                    <span class="coming-tag">阶段 4 · 即将上线</span>
+                    <h2>翻译与扫描件增强</h2>
+                    <p>翻译只会在你配置了 API Key 后启用；文本会发送到你指定的 OpenAI 兼容接口，其余处理仍在本机完成。</p>
+                    <ul class="feature-list">
+                        <li>中英对照 DOCX、纯译文 DOCX、保留版式 PDF</li>
+                        <li>术语表 glossary.txt + 界面临时术语覆盖</li>
+                        <li>手机照片自动裁边、透视矫正、去阴影</li>
+                    </ul>
+                </div>
+            </section>
+        </main>
+    </div>
+</div>
+
+<div class="toast-stack" id="toast-stack" aria-live="polite" aria-atomic="false"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

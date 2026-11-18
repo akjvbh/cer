@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+uploads/
+outputs/
+.env
+_start_log.txt
+.qoder-office-xlsx-locks/
+*.log
+.DS_Store
+Thumbs.db
+ui-*.png
