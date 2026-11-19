@@ -457,6 +457,8 @@ def make_samples(directory: Path) -> dict[str, Path]:
     make_pdf(letters_b, ["B1", "B2"])
     pages3_path = directory / "pages3.pdf"
     make_pdf(pages3_path, ["P1", "P2", "P3"])
+    pages300_path = directory / "pages300.pdf"
+    make_pdf(pages300_path, [f"L{index}" for index in range(1, 301)])
 
     noise_path = directory / "noise.png"
     noise = Image.effect_noise((900, 700), 120).convert("RGB")
@@ -567,6 +569,7 @@ def make_samples(directory: Path) -> dict[str, Path]:
         "letters_a": letters_a,
         "letters_b": letters_b,
         "pages3": pages3_path,
+        "pages300": pages300_path,
         "noisy": noisy_pdf_path,
         "png": image_path,
         "english": english_path,
@@ -644,7 +647,7 @@ def main() -> int:
             assert payload.get("office") is False
             assert payload.get("excel") is False
             assert payload.get("powerpoint") is False
-            assert payload.get("version") == "0.4.0"
+            assert payload.get("version") == "1.0.0"
             head_status, _, _ = http_request("HEAD", "/api/health")
             assert head_status == 200
 
@@ -689,6 +692,8 @@ def main() -> int:
             assert "translate-dropzone" in text and "translate-modes" in text
             assert "translate-config-warning" in text and "scan-dropzone" in text
             assert "scan-compare" in text and "scan-result" in text
+            assert "pdf-undo" in text and "pdf-redo" in text and "pdf-copy-selected" in text
+            assert "docworkshop-theme" in text and "localStorage" in text
             assert "app.js" in text and "app.css" in text
             status, _, css = http_request("GET", "/static/app.css")
             assert status == 200 and len(css) > 1000
@@ -1150,6 +1155,39 @@ def main() -> int:
                 ]
             finally:
                 document.close()
+
+        def test_pdf_preview_300_pages():
+            body, content_type = multipart(
+                {"limit": "50"},
+                {"file": ("pages300.pdf", samples["pages300"].read_bytes(), "application/pdf")},
+            )
+            status, _, response = http_request(
+                "POST",
+                "/api/pdf/preview",
+                data=body,
+                headers={"Content-Type": content_type, "Content-Length": str(len(body))},
+            )
+            assert status == 200
+            data = json.loads(response.decode("utf-8"))
+            assert len(data["pages"]) == 50
+            assert data["truncated"] is True
+            assert data["pages"][-1]["index"] == 50
+
+            task_id = post_task(
+                "/api/pdf/ops",
+                {"rotations": '{"1": 90}'},
+                [("pages300.pdf", samples["pages300"].read_bytes(), "application/pdf")],
+                field_name="file",
+            )
+            payload = poll_task(task_id)
+            status, _, content = http_request("GET", payload["result"]["download_url"])
+            assert status == 200
+            count, texts, rotations = read_pdf(content)
+            assert count == 300, f"导出后只剩 {count} 页"
+            assert texts[0] == "L1" and texts[-1] == "L300"
+            assert rotations[0] == 90
+
+        run("300 页 PDF：预览只出 50 页且导出保留其余页", test_pdf_preview_300_pages)
 
         def test_pdf_ops_delete_rotate():
             task_id = post_task(

@@ -45,6 +45,17 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
 )
+if os.getenv("START_LOG", "").strip():
+    try:
+        _file_handler = logging.FileHandler(
+            BASE_DIR / "_start_log.txt", mode="a", encoding="utf-8"
+        )
+        _file_handler.setFormatter(
+            logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+        )
+        logging.getLogger().addHandler(_file_handler)
+    except OSError as exc:
+        logging.getLogger("docworkshop").warning("无法写入启动日志：%s", exc)
 LOGGER = logging.getLogger("docworkshop")
 
 
@@ -61,8 +72,8 @@ MAX_BATCH_FILES = max(1, _env_int("MAX_BATCH_FILES", 200))
 MAX_BATCH_SIZE_MB = max(1, _env_int("MAX_BATCH_SIZE_MB", 500))
 MAX_BATCH_BYTES = MAX_BATCH_SIZE_MB * 1024 * 1024
 TASK_TTL_SECONDS = max(60, _env_int("TASK_TTL_SECONDS", 3600))
-CLEANUP_INTERVAL_SECONDS = max(60, _env_int("CLEANUP_INTERVAL_SECONDS", 600))
-VERSION = "0.4.0"
+CLEANUP_INTERVAL_SECONDS = max(60, _env_int("CLEANUP_INTERVAL_SECONDS", 3600))
+VERSION = "1.0.0"
 
 TASKS: dict[str, dict[str, Any]] = {}
 TASK_LOCK = threading.RLock()
@@ -121,7 +132,8 @@ async def lifespan(app: FastAPI):
     _cleanup_once()
     threading.Thread(target=_cleanup_loop, daemon=True, name="temp-cleaner").start()
     LOGGER.info(
-        "服务启动 | Python %s | Office %s | 监听 127.0.0.1:%s",
+        "服务启动 | 版本 %s | Python %s | Office %s | 监听 127.0.0.1:%s",
+        VERSION,
         platform.python_version(),
         "可用" if converter.office_available() else "不可用",
         os.getenv("PORT", "8000"),

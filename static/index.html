@@ -5,6 +5,18 @@
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta name="description" content="文档工坊：本机运行的 Word、PDF、图片等多格式文档转换工具。">
     <title>文档工坊 · 本地文档转换器</title>
+    <script>
+        (() => {
+            try {
+                const saved = localStorage.getItem("docworkshop-theme");
+                if (saved === "light" || saved === "dark") {
+                    document.documentElement.setAttribute("data-theme", saved);
+                }
+            } catch (error) {
+                /* localStorage 不可用时保持跟随系统，首屏不会闪。 */
+            }
+        })();
+    </script>
     <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%232f63f4'/%3E%3Cpath d='M20 16h17l9 9v23H20z' fill='white'/%3E%3Cpath d='M37 16v9h9' fill='%23cfdcff'/%3E%3Cpath d='M25 33h15M25 39h15' stroke='%232f63f4' stroke-width='2.5' stroke-linecap='round'/%3E%3C/svg%3E">
     <link rel="stylesheet" href="/static/app.css">
 </head>
@@ -199,7 +211,7 @@
                                 </svg>
                             </div>
                             <p>结果会出现在这里</p>
-                            <span>选择文件并开始转换后，可在这里下载结果。</span>
+                            <span>支持 Word、PDF、Excel、PPT、Markdown、TXT 与常见图片。选择文件并开始转换后，可在这里下载结果。</span>
                         </div>
                     </section>
                 </div>
@@ -302,7 +314,7 @@
                             </svg>
                         </div>
                         <p>批量队列还是空的</p>
-                        <span>选择多个文件或拖入文件夹后，会按扩展名自动分组。</span>
+                        <span>支持 Word、PDF、Excel、PPT、Markdown、TXT 与图片；选择多个文件或拖入文件夹后，会按扩展名自动分组。</span>
                     </div>
                 </section>
 
@@ -433,7 +445,7 @@
                                 </svg>
                             </div>
                             <p>压缩结果会出现在这里</p>
-                            <span>选择文件后会先显示四档体积预估。</span>
+                            <span>仅支持 PDF 与图片（PNG、JPG、WebP、BMP、GIF、TIFF）。选择文件后会先显示四档体积预估。</span>
                         </div>
                     </section>
                 </div>
@@ -497,15 +509,18 @@
                             <div class="pdf-toolbar">
                                 <p class="pdf-stats" id="pdf-stats">共 0 页，已选 0 页</p>
                                 <div class="pdf-toolbar-actions">
+                                    <button class="mini-button" type="button" id="pdf-undo" title="撤销（Ctrl+Z）" disabled>撤销</button>
+                                    <button class="mini-button" type="button" id="pdf-redo" title="重做（Ctrl+Shift+Z）" disabled>重做</button>
                                     <button class="mini-button" type="button" id="pdf-select-all">全选</button>
                                     <button class="mini-button" type="button" id="pdf-invert">反选</button>
+                                    <button class="mini-button" type="button" id="pdf-copy-selected">复制选中</button>
                                     <button class="mini-button" type="button" id="pdf-rotate-selected">顺时针旋转选中</button>
                                     <button class="mini-button" type="button" id="pdf-delete-selected">删除选中</button>
                                     <button class="mini-button" type="button" id="pdf-reset-order">恢复原顺序</button>
                                     <button class="mini-button accent" type="button" id="pdf-export">应用并下载</button>
                                 </div>
                             </div>
-                            <p class="form-hint">按原文件页码。勾选页面后可拖拽调整顺序；每点一次旋转 +90°，提交的是最终角度。</p>
+                            <p class="form-hint">按原文件页码。勾选页面后可拖拽调整顺序、复制；每点一次旋转 +90°，提交的是最终角度。删除、旋转、排序、复制都可用 Ctrl+Z 撤销（最多 50 步）。</p>
                             <div class="pdf-grid" id="pdf-grid"></div>
                             <p class="office-warning" id="pdf-truncated" hidden>仅显示前 50 页，其余页面保存时原样保留。</p>
 
@@ -530,7 +545,7 @@
                                 </svg>
                             </div>
                             <p>还没有加载 PDF</p>
-                            <span>加载后可预览页面、删除、旋转、拖拽排序并一次性提交。</span>
+                            <span>仅支持 PDF。加载后可预览页面、删除、旋转、复制、拖拽排序并一次性提交。</span>
                         </div>
                     </section>
 
@@ -544,7 +559,7 @@
                             <button class="secondary-button full-button" type="button" id="merge-pick">选择 PDF 文件</button>
                             <input type="file" id="merge-file-input" accept=".pdf" multiple hidden>
                             <div class="merge-list" id="merge-list">
-                                <p class="merge-empty">还没有选择 PDF</p>
+                                <p class="merge-empty">还没有选择 PDF。合并仅支持 PDF 文件。</p>
                             </div>
 
                             <div class="form-row">
@@ -721,7 +736,7 @@
                             <p class="progress-note">翻译按块并发请求，进度按已完成段数计算；失败时不会生成半成品。</p>
                         </div>
 
-                        <p class="ai-empty" id="translate-empty">译文会出现在这里。直译文本会发送到你配置的接口，其余处理仍在本机完成。</p>
+                        <p class="ai-empty" id="translate-empty">支持 PDF、DOCX、TXT。译文会出现在这里；直译文本会发送到你配置的接口，其余处理仍在本机完成。</p>
                         <div class="result-list" id="translate-result-list"></div>
                     </section>
 
@@ -786,7 +801,7 @@
                             </div>
                         </div>
 
-                        <p class="ai-empty" id="scan-empty">增强结果会出现在这里，可并排对比原图。</p>
+                        <p class="ai-empty" id="scan-empty">支持 JPG、PNG、WebP、BMP、GIF、TIFF 图片。增强结果会出现在这里，可并排对比原图。</p>
                         <div class="result-list" id="scan-result-list"></div>
                         <p class="ai-note">本版不做 OCR：扫描版 PDF 提取不到文字时，仍需外部 OCR 工具先识别。</p>
                     </section>

@@ -946,6 +946,25 @@ a {
     color: var(--danger);
 }
 
+.error-details {
+    margin-top: 7px;
+}
+
+.error-details summary {
+    width: fit-content;
+    color: var(--muted);
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.error-details summary:hover {
+    color: var(--danger);
+}
+
+.error-details[open] summary {
+    margin-bottom: 2px;
+}
+
 .result-actions {
     display: flex;
     align-items: center;

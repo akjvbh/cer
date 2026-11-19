@@ -3,11 +3,19 @@
 一个**在本机运行的办公文档转换与处理工具箱**：拖入文件、选择目标格式，转换在本机完成，结果直接下载。不需要登录、不上传云端、不依赖 Docker 或数据库。
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?logo=python&logoColor=white)
-![FastAPI](https://img.shields.io/badge/FastAPI-0.1x-009688?logo=fastapi&logoColor=white)
+![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688?logo=fastapi&logoColor=white)
 ![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11-0078D4?logo=windows&logoColor=white)
-![License](https://img.shields.io/badge/License-Private-lightgrey)
+![License](https://img.shields.io/badge/License-MIT-green)
 
-> 当前版本 **0.4.0 / 阶段 4（AI 增强）**：在转换、批量、压缩与 PDF 工具之上，新增文献翻译（中英对照 / 纯译文 / 保留版式 PDF）与扫描件增强（透视矫正、裁边、去阴影）。翻译调用你配置的 OpenAI 兼容接口，其余处理全部在本机完成。
+> 当前版本 **1.0.0 / 阶段 5（打磨与交付）**：转换、批量、压缩、PDF 工具、文献翻译与扫描件增强全部可用，并补齐三态主题、页面操作撤销/重做、后台清理、启动日志、三项自检脚本与交付文档。除翻译调用你配置的 OpenAI 兼容接口外，所有文件处理都在本机完成。
+
+## 它解决什么问题
+
+- 收到一份 `.doc` 或 `.pptx`，手边只有浏览器，不想上传到在线转换站：本机打开就能转 PDF。
+- 论文、合同、说明书需要把几十页 PDF 拆页、删页、旋转或重新排序，又不想学专业 PDF 编辑器：缩略图里点选、拖拽、撤销即可。
+- 扫描/拍照的纸质表格发灰、倾斜、有阴影：直接获得矫正、裁边、去阴影后的 PNG。
+- 英文文献需要快速读懂，又希望保留原文对照或原版式：中英对照 DOCX、纯译文 DOCX、覆盖原文的 PDF 三种输出任选。
+- 一批格式混杂的文件夹要统一处理：按扩展名自动分组、各组选目标格式、失败项单独重试，不因一个坏文件中断整批。
 
 ## 快速开始
 
@@ -17,7 +25,7 @@
 start.bat
 ```
 
-脚本会自动创建 `.venv`、安装依赖、选择 8000（被占用则 8001）端口并打开浏览器。关闭命令窗口即停止服务。
+脚本会自动创建 `.venv`、安装依赖，并从 8000 开始寻找空闲端口（8000 被占用则依次尝试 8001–8005），在窗口和控制台打印实际地址，同时把启动过程写入 `_start_log.txt`。关闭命令窗口即停止服务。
 
 **方式二：手动**
 
@@ -27,13 +35,17 @@ py -3.11 -m venv .venv
 .venv\Scripts\python.exe main.py
 ```
 
-然后打开 <http://127.0.0.1:8000>。
+然后打开 <http://127.0.0.1:8000>（若 `.env` 里改了 `PORT`，以实际打印的地址为准）。
 
 环境要求：
 
 - Windows 10/11（Office COM 相关能力仅 Windows 可用）
 - Python 3.11
 - 可选：本机安装 Microsoft Office（用于高保真 `docx → pdf`）。未安装时自动降级，不影响启动与其他功能。
+
+**Windows 上 `py` / `python` 不可用怎么办**
+
+如果双击或输入 `python` 弹到 Microsoft Store，说明系统里的 `python.exe` 是应用商店占位程序。请从 [python.org](https://www.python.org/downloads/windows/) 安装 3.11，并在安装时勾选 “Add python.exe to PATH”；或直接使用已安装的 `py -3.11`。`start.bat` 优先调用项目内的 `.venv\Scripts\python.exe`，装好 `.venv` 后不依赖 PATH 里的 `python`。
 
 ## 已支持的转换
 
@@ -78,7 +90,7 @@ py -3.11 -m venv .venv
 
 左侧选择「PDF 工具」，页面分三块：
 
-1. **页面编辑**：加载 PDF 后生成缩略图网格（最多显示前 50 页），可勾选、旋转、删除、拖拽排序，修改只在本地状态中累积，点击「应用并下载」后一次性提交。
+1. **页面编辑**：加载 PDF 后生成缩略图网格（最多显示前 50 页），可勾选、旋转、删除、复制、拖拽排序，修改只在本地状态中累积，点击「应用并下载」后一次性提交。删除、旋转、排序、复制共用同一个撤销栈（最多 50 步），支持页面按钮与 `Ctrl+Z` / `Ctrl+Shift+Z`，无可撤销/重做内容时按钮自动置灰。
 2. **合并**：按选择顺序合并至少两个 PDF，支持首尾相接、逐页交替、插入到指定位置（`0` 表示插到第 1 页之前）。
 3. **逐页导出 JPG**：为当前 PDF 的每一页生成 JPG 并打包 ZIP；每张图片必须小于等于设定上限，先降质量再降 DPI，到 `72 DPI + q50` 仍超限时该文件明确失败并给出当前体积，不会静默超限。
 
@@ -112,6 +124,14 @@ py -3.11 -m venv .venv
 
 上传限制：默认单文件不超过 **200MB**，批量总计不超过 **500MB**、最多 **200 个文件**；文件名、扩展名、文件头（magic）都会校验，服务端使用 UUID 保存，不信任任何用户提供的路径。
 
+界面细节：
+
+- 主题按钮按「跟随系统 → 浅色 → 深色」循环，选择写入 `localStorage`；首屏在 `<head>` 中先恢复主题，不会闪白/闪黑。
+- 窗口宽度小于 900px 时左侧导航变为顶部横向滚动标签，结果卡片单列；600px 宽仍可正常操作。
+- 统一顶部 toast 约 3 秒自动消失；失败结果卡片提供可展开的「查看详细错误」与复制按钮。
+- 选择超过 50MB 的文件会提示「文件较大，转换可能需要 1-2 分钟」；上传/转换/压缩/导出期间按钮禁用并切换文案。
+- `uploads/` 与 `outputs/` 由后台线程每小时清理一次超过 1 小时的临时文件；服务重启后任务记录清空属于预期行为。
+
 ## 配置
 
 复制 `.env.example` 为 `.env` 后按需修改，重启生效：
@@ -125,6 +145,9 @@ py -3.11 -m venv .venv
 | `MAX_BATCH_SIZE_MB` | `500` | 单批总大小上限 |
 | `OFFICE_ENABLED` | `1` | 是否允许调用本机 Office COM |
 | `OFFICE_TIMEOUT_SECONDS` | `600` | 单次 Office 转换超时；`start.bat` 的演示默认值为 120 |
+| `TASK_TTL_SECONDS` | `3600` | 任务与结果保留秒数，过期由后台清理 |
+| `CLEANUP_INTERVAL_SECONDS` | `3600` | 后台清理间隔秒数，最小值 60 |
+| `START_LOG` | 空 | 由 `start.bat` 设为 `1` 时，把日志同时写入 `_start_log.txt` |
 | `TRANSLATE_API_KEY` | 空 | 翻译接口密钥；为空时「AI 增强」中的翻译区域置灰 |
 | `TRANSLATE_BASE_URL` | `https://api.deepseek.com/v1` | OpenAI 兼容接口前缀，实际请求 `<base>/chat/completions` |
 | `TRANSLATE_MODEL` | `deepseek-chat` | 翻译使用的模型名 |
@@ -200,7 +223,25 @@ curl.exe -F "file=@samples\示例_扫描照片.jpg" http://127.0.0.1:8000/api/sc
 - **PDF 预览只渲染前 50 页**：长文档的后续页面仍会参与保存与导出，不会丢页，只是编辑界面不显示缩略图。
 - **逐页 JPG 有硬上限**：到 `72 DPI + q50` 仍超过设定 KB 时，该文件明确失败并给出当前体积，不会悄悄超限。
 - **本版没有 PDF 批注 / 拆分接口**：页面编辑通过 `delete_pages / rotations / page_order` 组合完成；拆分可理解为白名单式 `page_order`。
-- 阶段 5 尚未实现：最终演示打磨与整体性能验收。
+- **Known limitations（汇总）**：仅支持 Windows；Office COM 不支持并发；PDF 压缩会丢文字层；服务无鉴权、无 HTTPS，仅限本机或可信局域网；任务与结果不持久化；不做 OCR。
+
+## 常见问题
+
+**Word 转换卡住不动，或结束后 WINWORD.EXE 还在**
+
+Office COM 转换受 `OFFICE_TIMEOUT_SECONDS` 限制（`start.bat` 演示默认 120 秒）。超时后服务会执行 `taskkill /F /IM WINWORD.EXE` 并把任务标记为失败；如果仍残留，请关闭所有 Word 窗口后在任务管理器结束 `WINWORD.EXE`，再重试。Office 任务串行执行，同时提交多个 Word/PPT 任务时后面的会排队。
+
+**双击 `start.bat` 后窗口里没有文字，或一闪而过**
+
+先看根目录的 `_start_log.txt`。常见原因是 Python 未安装/不是 3.11、`.venv` 创建失败或依赖安装失败。窗口底部会给出具体阶段（`[1/3]` 创建环境、`[2/3]` 安装依赖、`[3/3]` 启动）。也可以在项目根目录手动执行 `.venv\Scripts\python.exe main.py` 查看完整报错。若端口 8000–8005 全部被占用，脚本会提示并退出。
+
+**翻译按钮是灰的，或提示未配置翻译密钥**
+
+复制 `.env.example` 为 `.env`，填写 `TRANSLATE_API_KEY`（以及需要时的 `TRANSLATE_BASE_URL`、`TRANSLATE_MODEL`），重启服务。密钥留空时界面会显示配置说明并禁用翻译；服务端接口也会返回 `400 未配置翻译密钥…`。其他转换、压缩与 PDF 工具不需要密钥。
+
+**双击 `python` 弹出 Microsoft Store**
+
+这是 Windows 的应用执行别名占位程序。安装 python.org 的 3.11 并勾选 “Add python.exe to PATH”，或使用 `py -3.11` 创建虚拟环境；`start.bat` 启动服务时始终使用 `.venv\Scripts\python.exe`，不依赖 PATH 中的 `python`。
 
 ## 项目结构
 
@@ -215,34 +256,43 @@ assets/fonts/      中文 Noto Sans SC 子集（SIL OFL 1.1，许可见 OFL.txt�
 glossary.txt       术语表（英文=中文，界面自动预填）
 static/            原生 HTML/CSS/JS 前端（无框架、无构建）
 tests/smoke.py     自启动服务的端到端冒烟测试
+tests/check_frontend.py    前端静态自检（括号、id、资源、标签）
+tests/test_page_semantics.py  页码语义测试（删页/复制/旋转）
 samples/           可直接拖入的示例文件
 uploads/ outputs/  运行时目录（已忽略，不提交）
 docs/prompts/      需求、决策与阶段文档
 requirements.txt   Python 依赖
-start.bat          Windows 一键启动
+start.bat          Windows 一键启动（自动选端口、写 _start_log.txt）
+CHANGELOG.md       分阶段变更记录
+LICENSE            MIT 许可证
 ```
 
 ## 测试
 
 ```bat
+.venv\Scripts\python.exe tests\check_frontend.py
+.venv\Scripts\python.exe tests\test_page_semantics.py
 .venv\Scripts\python.exe tests\smoke.py
 ```
 
-测试会在随机端口自行启动服务（关闭 Office），并启动一个本地假模型接口，用真实 HTTP 上传完成 55 项检查，覆盖：
+三个脚本都可单独运行，退出码 `0` 表示通过、`1` 表示失败：
 
-- 健康检查、配置上限、翻译配置与术语表、格式注册表、首页静态资源与阶段 4 前端标记；
-- DOCX → TXT/HTML/MD/PDF、PDF → TXT/DOCX/JPG/PNG、XLSX → CSV/单表与多表、CSV → XLSX、XLS → XLSX/CSV、Markdown/TXT → PDF、图片互转与图片 → Word；
-- Office 不可用时 `.doc`/`.pptx` 的明确错误；
-- 批量 3 种格式的 ZIP 与单文件下载、坏文件失败隔离、ZIP 重名加序号、批量数量与参数校验；
-- 415 扩展名、400 不支持的组合、404、中文下载头与 CSV 的 UTF-8 BOM；
-- PDF 预览（PNG base64、原 rotation、50 页截断）、加密 PDF 400；
-- PDF 删页 + 旋转、保留原 rotation、`page_order` 白名单与重复页、越界页码与空参数报错；
-- 合并三种模式的实际页序、四档压缩预估、PDF 文字层丢失、图片压缩、非 PDF/图片 400；
-- 逐页 JPG 全部 ≤300KB，以及上限无法达成时的明确失败；
-- 翻译三种输出模式的成品结构、术语表生效、进度文案与百分比；保留版式拒绝 DOCX 返回明确 400；未配置密钥时 400；
-- 扫描件增强对倾斜 + 阴影照片完成四边形检测与透视矫正，非图片返回 415。
+- `check_frontend.py`：纯静态检查 `static/` 的 JS/CSS 括号配平、HTML 标签闭合、`$()` / `getElementById` 引用的 id 是否存在、HTML 与 JS 引用的 `/static/` 资源是否存在。
+- `test_page_semantics.py`：构造 5 页 PDF，验证删第 2 页后共 4 页、`page_order` 重复页码得到复制页、旋转 90° 后 `page.rect` 宽高互换、删除与旋转同时提交的顺序。
+- `smoke.py`：在随机端口自行启动服务（关闭 Office），并启动一个本地假模型接口，用真实 HTTP 上传完成 56 项检查，覆盖：
+  - 健康检查、配置上限、翻译配置与术语表、格式注册表、首页静态资源与阶段 5 前端标记；
+  - DOCX → TXT/HTML/MD/PDF、PDF → TXT/DOCX/JPG/PNG、XLSX → CSV/单表与多表、CSV → XLSX、XLS → XLSX/CSV、Markdown/TXT → PDF、图片互转与图片 → Word；
+  - Office 不可用时 `.doc`/`.pptx` 的明确错误；
+  - 批量 3 种格式的 ZIP 与单文件下载、坏文件失败隔离、ZIP 重名加序号、批量数量与参数校验；
+  - 415 扩展名、400 不支持的组合、404、中文下载头与 CSV 的 UTF-8 BOM；
+  - PDF 预览（PNG base64、原 rotation、50 页截断）、300 页 PDF 只预览 50 页且导出后 300 页完整保留、加密 PDF 400；
+  - PDF 删页 + 旋转、保留原 rotation、`page_order` 白名单与重复页、越界页码与空参数报错；
+  - 合并三种模式的实际页序、四档压缩预估、PDF 文字层丢失、图片压缩、非 PDF/图片 400；
+  - 逐页 JPG 全部 ≤300KB，以及上限无法达成时的明确失败；
+  - 翻译三种输出模式的成品结构、术语表生效、进度文案与百分比；保留版式拒绝 DOCX 返回明确 400；未配置密钥时 400；
+  - 扫描件增强对倾斜 + 阴影照片完成四边形检测与透视矫正，非图片返回 415。
 
-前端验证：桌面与浅色/深色主题已用浏览器实际操作；压缩确认框、缩略图旋转/删除/拖拽排序、合并与 JPG 下载、翻译三种模式（含本地假接口）、扫描件原图/结果并排对比均验证通过，控制台无报错。未配置密钥时翻译区域置灰并显示配置说明。
+浏览器验收：浅色/深色/跟随系统三态主题切换与刷新后保持、600px 窄屏布局、PDF 删页/复制后 `Ctrl+Z` 撤销与 `Ctrl+Shift+Z` 重做、连续操作超过 50 步时只保留最近 50 步、300 页 PDF 预览提示、超过 50MB 文件提示、错误详情折叠展开均已实际操作，控制台无报错。未配置密钥时翻译区域置灰并显示配置说明。
 
 ## 阶段规划
 
@@ -252,7 +302,7 @@ start.bat          Windows 一键启动
 | 2 | 完整格式矩阵、批量与文件夹、失败清单与重试 | 已完成 |
 | 3 | 压缩、PDF 合并/删页/旋转/重排、缩略图编辑器、逐页 JPG | 已完成 |
 | 4 | 翻译（双语/仅译文/版式叠加）、术语表、扫描增强 | 已完成 |
-| 5 | 整体打磨、异常与性能验收、演示材料与交付 | 计划中 |
+| 5 | 三态主题、响应式、撤销/重做、空/加载/错误状态、后台清理、启动兜底、三项测试与交付文档 | 已完成 |
 
 ## 隐私
 

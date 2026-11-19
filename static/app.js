@@ -68,6 +68,8 @@ const state = {
         selected: new Set(),
         rotations: {},
         deleted: new Set(),
+        history: [],
+        future: [],
         loading: false,
         exporting: false,
         dragIndex: null,
@@ -106,6 +108,7 @@ const COMPRESS_LEVELS = ["80", "60", "40", "20"];
 const COMPRESS_IMAGE_EXTS = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"];
 const TRANSLATE_EXTS = ["pdf", "docx", "txt"];
 const SCAN_EXTS = ["png", "jpg", "jpeg", "webp", "bmp", "gif", "tiff"];
+const PDF_HISTORY_LIMIT = 50;
 
 const $ = (id) => document.getElementById(id);
 
@@ -137,6 +140,20 @@ function formatLabel(target) {
     return FORMAT_LABELS[target] || String(target || "").toUpperCase();
 }
 
+const LARGE_FILE_BYTES = 50 * 1024 * 1024;
+
+function warnLargeFile(file) {
+    if (file && Number(file.size) > LARGE_FILE_BYTES) {
+        showToast("文件较大，转换可能需要 1-2 分钟", "info");
+    }
+}
+
+function warnLargeFiles(files) {
+    if ((files || []).some((file) => file && Number(file.size) > LARGE_FILE_BYTES)) {
+        showToast("文件较大，转换可能需要 1-2 分钟", "info");
+    }
+}
+
 function kindOf(ext) {
     if (ext === "pdf") {
         return "pdf";
@@ -150,26 +167,40 @@ function kindOf(ext) {
     return "office";
 }
 
-function currentTheme() {
-    const explicit = document.documentElement.getAttribute("data-theme");
-    if (explicit === "dark" || explicit === "light") {
-        return explicit;
+const THEME_MODES = ["system", "light", "dark"];
+const THEME_LABELS = {
+    system: "主题：跟随系统（点击切到浅色）",
+    light: "主题：浅色（点击切到深色）",
+    dark: "主题：深色（点击切到跟随系统）",
+};
+
+function savedThemeMode() {
+    let saved = null;
+    try {
+        saved = localStorage.getItem(THEME_KEY);
+    } catch (error) {
+        saved = null;
     }
-    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+    return THEME_MODES.includes(saved) ? saved : "system";
 }
 
 function updateThemeButton() {
     const button = $("theme-toggle");
-    const dark = currentTheme() === "dark";
-    const label = dark ? "切换到浅色主题" : "切换到深色主题";
+    const mode = savedThemeMode();
+    const label = THEME_LABELS[mode];
     button.setAttribute("aria-label", label);
     button.title = label;
+    button.dataset.themeMode = mode;
 }
 
-function applyTheme(theme) {
-    document.documentElement.setAttribute("data-theme", theme);
+function applyTheme(mode) {
+    if (mode === "system") {
+        document.documentElement.removeAttribute("data-theme");
+    } else {
+        document.documentElement.setAttribute("data-theme", mode);
+    }
     try {
-        localStorage.setItem(THEME_KEY, theme);
+        localStorage.setItem(THEME_KEY, mode);
     } catch (error) {
         /* 隐私模式下 localStorage 不可用时，仅当前页面生效。 */
     }
@@ -177,20 +208,17 @@ function applyTheme(theme) {
 }
 
 function initTheme() {
-    let saved = null;
-    try {
-        saved = localStorage.getItem(THEME_KEY);
-    } catch (error) {
-        saved = null;
-    }
-    if (saved === "dark" || saved === "light") {
-        document.documentElement.setAttribute("data-theme", saved);
+    const mode = savedThemeMode();
+    if (mode === "system") {
+        document.documentElement.removeAttribute("data-theme");
+    } else {
+        document.documentElement.setAttribute("data-theme", mode);
     }
     updateThemeButton();
     const media = window.matchMedia("(prefers-color-scheme: dark)");
     if (typeof media.addEventListener === "function") {
         media.addEventListener("change", () => {
-            if (!document.documentElement.hasAttribute("data-theme")) {
+            if (savedThemeMode() === "system") {
                 updateThemeButton();
             }
         });
@@ -341,6 +369,7 @@ function setFile(file) {
 
     state.file = file;
     state.target = targets.includes(DEFAULT_TARGETS[ext]) ? DEFAULT_TARGETS[ext] : targets[0];
+    warnLargeFile(file);
 
     const icon = $("file-icon");
     icon.textContent = ext.toUpperCase().slice(0, 4);
@@ -465,6 +494,18 @@ function appendResult(result) {
     card.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
+function errorDetails(message) {
+    const details = document.createElement("details");
+    details.className = "error-details";
+    const summary = document.createElement("summary");
+    summary.textContent = "查看详细错误";
+    const note = document.createElement("p");
+    note.className = "result-note";
+    note.textContent = message || "处理失败，请重试";
+    details.append(summary, note);
+    return details;
+}
+
 function appendError(message) {
     const list = $("result-list");
     const card = document.createElement("article");
@@ -481,9 +522,7 @@ function appendError(message) {
     title.className = "result-name";
     title.textContent = "转换失败";
 
-    const note = document.createElement("p");
-    note.className = "result-note";
-    note.textContent = message || "转换失败，请重试";
+    const details = errorDetails(message);
 
     const actions = document.createElement("div");
     actions.className = "result-actions";
@@ -494,7 +533,7 @@ function appendError(message) {
     copy.textContent = "复制错误信息";
     actions.append(copy);
 
-    body.append(title, note, actions);
+    body.append(title, details, actions);
     card.append(status, body);
     list.append(card);
     hideEmptyStateIfNeeded();
@@ -622,7 +661,7 @@ function showToast(message, type = "info") {
     window.setTimeout(() => {
         toast.classList.add("leaving");
         window.setTimeout(() => toast.remove(), 220);
-    }, 3400);
+    }, 2800);
 }
 
 async function copyText(text, successMessage = "错误信息已复制") {
@@ -1081,6 +1120,7 @@ function addBatchFiles(fileList) {
     let added = 0;
     let invalid = 0;
     let truncated = 0;
+    warnLargeFiles(files.filter((file) => file.size > 0 && file.size <= fileLimitBytes));
 
     for (const file of files) {
         if (batch.items.length >= batch.maxFiles) {
@@ -1818,9 +1858,7 @@ function appendOperationError(listId, message, title = "处理失败") {
     heading.className = "result-name";
     heading.textContent = title;
 
-    const note = document.createElement("p");
-    note.className = "result-note";
-    note.textContent = message || "处理失败，请重试";
+    const details = errorDetails(message);
 
     const actions = document.createElement("div");
     actions.className = "result-actions";
@@ -1831,7 +1869,7 @@ function appendOperationError(listId, message, title = "处理失败") {
     copy.textContent = "复制错误信息";
     actions.append(copy);
 
-    body.append(heading, note, actions);
+    body.append(heading, details, actions);
     card.append(status, body);
     list.append(card);
     card.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -1911,6 +1949,7 @@ function setCompressFile(file) {
     $("compress-file-name").textContent = file.name;
     $("compress-file-size").textContent = `${formatBytes(file.size)} · ${ext.toUpperCase()} 文件`;
     $("compress-selected").hidden = false;
+    warnLargeFile(file);
     updateCompressUi();
     estimateCompression(file);
 }
@@ -2090,11 +2129,68 @@ function pdfPreviewIndices() {
     return state.pdf.order.filter((index) => Boolean(state.pdf.pages[index]));
 }
 
+function pdfSnapshot() {
+    return {
+        order: state.pdf.order.slice(),
+        rotations: { ...state.pdf.rotations },
+        deleted: Array.from(state.pdf.deleted),
+        selected: Array.from(state.pdf.selected),
+    };
+}
+
+function pdfRestore(snapshot) {
+    state.pdf.order = snapshot.order.slice();
+    state.pdf.rotations = { ...snapshot.rotations };
+    state.pdf.deleted = new Set(snapshot.deleted);
+    state.pdf.selected = new Set(snapshot.selected);
+}
+
+function pushPdfHistory() {
+    state.pdf.history.push(pdfSnapshot());
+    if (state.pdf.history.length > PDF_HISTORY_LIMIT) {
+        state.pdf.history.shift();
+    }
+    state.pdf.future = [];
+}
+
+function undoPdf() {
+    if (state.pdf.loading || state.pdf.exporting) {
+        return;
+    }
+    if (!state.pdf.history.length) {
+        showToast("没有可撤销的操作", "info");
+        return;
+    }
+    state.pdf.future.push(pdfSnapshot());
+    if (state.pdf.future.length > PDF_HISTORY_LIMIT) {
+        state.pdf.future.shift();
+    }
+    pdfRestore(state.pdf.history.pop());
+    renderPdfGrid();
+}
+
+function redoPdf() {
+    if (state.pdf.loading || state.pdf.exporting) {
+        return;
+    }
+    if (!state.pdf.future.length) {
+        showToast("没有可重做的操作", "info");
+        return;
+    }
+    state.pdf.history.push(pdfSnapshot());
+    if (state.pdf.history.length > PDF_HISTORY_LIMIT) {
+        state.pdf.history.shift();
+    }
+    pdfRestore(state.pdf.future.pop());
+    renderPdfGrid();
+}
+
 function updatePdfButtons() {
-    const busy = state.pdf.loading || state.pdf.exporting;
+    const busy = state.pdf.loading || state.pdf.exporting || state.pdf.jpgBusy;
     [
         "pdf-select-all",
         "pdf-invert",
+        "pdf-copy-selected",
         "pdf-rotate-selected",
         "pdf-delete-selected",
         "pdf-reset-order",
@@ -2105,7 +2201,11 @@ function updatePdfButtons() {
             button.disabled = busy;
         }
     });
+    $("pdf-undo").disabled = busy || !state.pdf.history.length;
+    $("pdf-redo").disabled = busy || !state.pdf.future.length;
+    $("pdf-export").textContent = state.pdf.exporting ? "处理中…" : "应用并下载";
     $("pdf-jpg-btn").disabled = busy || !state.pdf.file;
+    $("pdf-jpg-btn-text").textContent = state.pdf.jpgBusy ? "导出中…" : "导出为 JPG";
     $("pdf-remove").disabled = busy || !state.pdf.file;
     $("pdf-dropzone").classList.toggle("is-disabled", busy);
 }
@@ -2219,6 +2319,9 @@ async function loadPdfForEditing(file) {
     state.pdf.selected = new Set();
     state.pdf.rotations = {};
     state.pdf.deleted = new Set();
+    state.pdf.history = [];
+    state.pdf.future = [];
+    warnLargeFile(file);
     $("pdf-file-name").textContent = file.name;
     $("pdf-file-size").textContent = `${formatBytes(file.size)} · PDF 文件`;
     $("pdf-selected").hidden = false;
@@ -2247,6 +2350,8 @@ async function loadPdfForEditing(file) {
         state.pdf.selected = new Set();
         state.pdf.rotations = {};
         state.pdf.deleted = new Set();
+        state.pdf.history = [];
+        state.pdf.future = [];
         $("pdf-editor").hidden = false;
         $("pdf-truncated").hidden = !data.truncated;
         renderPdfGrid();
@@ -2273,6 +2378,8 @@ function clearPdfFile() {
     state.pdf.selected = new Set();
     state.pdf.rotations = {};
     state.pdf.deleted = new Set();
+    state.pdf.history = [];
+    state.pdf.future = [];
     $("pdf-file-input").value = "";
     $("pdf-selected").hidden = true;
     $("pdf-editor").hidden = true;
@@ -2287,6 +2394,7 @@ function clearPdfFile() {
 
 function rotatePdfPage(index) {
     const current = Number(state.pdf.rotations[index]) || 0;
+    pushPdfHistory();
     state.pdf.rotations[index] = (current + 90) % 360;
     renderPdfGrid();
 }
@@ -2296,6 +2404,7 @@ function deletePdfPage(index) {
     if (position < 0) {
         return;
     }
+    pushPdfHistory();
     state.pdf.order.splice(position, 1);
     state.pdf.selected.delete(index);
     state.pdf.deleted.add(index);
@@ -2337,6 +2446,7 @@ function rotateSelectedPdfPages() {
         showToast("请先勾选要旋转的页面", "info");
         return;
     }
+    pushPdfHistory();
     state.pdf.selected.forEach((index) => {
         const current = Number(state.pdf.rotations[index]) || 0;
         state.pdf.rotations[index] = (current + 90) % 360;
@@ -2344,11 +2454,30 @@ function rotateSelectedPdfPages() {
     renderPdfGrid();
 }
 
+function copySelectedPdfPages() {
+    if (!state.pdf.selected.size) {
+        showToast("请先勾选要复制的页面", "info");
+        return;
+    }
+    pushPdfHistory();
+    const copied = [];
+    state.pdf.order.forEach((index) => {
+        copied.push(index);
+        if (state.pdf.selected.has(index)) {
+            copied.push(index);
+        }
+    });
+    state.pdf.order = copied;
+    renderPdfGrid();
+    showToast(`已复制 ${state.pdf.selected.size} 页，可继续调整顺序`, "success");
+}
+
 function deleteSelectedPdfPages() {
     if (!state.pdf.selected.size) {
         showToast("请先勾选要删除的页面", "info");
         return;
     }
+    pushPdfHistory();
     state.pdf.selected.forEach((index) => {
         const position = state.pdf.order.indexOf(index);
         if (position >= 0) {
@@ -2361,6 +2490,7 @@ function deleteSelectedPdfPages() {
 }
 
 function resetPdfOrder() {
+    pushPdfHistory();
     state.pdf.order = Array.from({ length: state.pdf.total }, (_, index) => index + 1);
     state.pdf.deleted = new Set();
     state.pdf.selected = new Set(
@@ -2376,6 +2506,7 @@ function reorderPdfPages(fromIndex, toIndex) {
     if (from < 0 || to < 0 || from === to) {
         return;
     }
+    pushPdfHistory();
     order.splice(from, 1);
     const insert = from < to ? to - 1 : to;
     order.splice(insert, 0, fromIndex);
@@ -2565,6 +2696,7 @@ function addMergeFiles(files) {
         showToast(`已忽略 ${invalid.length} 个非 PDF 文件`, "warning");
     }
     const accepted = incoming.filter((file) => isPdfFile(file) && file.size > 0);
+    warnLargeFiles(accepted);
     accepted.forEach((file) => {
         if (file.size > state.maxFileMb * 1024 * 1024) {
             showToast(`${file.name} 超过 ${state.maxFileMb}MB 上限`, "error");
@@ -2732,6 +2864,7 @@ function setTranslateFile(file) {
         return;
     }
     tr.file = file;
+    warnLargeFile(file);
     if (tr.mode === "layout" && ext !== "pdf") {
         tr.mode = "translated";
         showToast("保留版式只接受 PDF，已切换到纯译文", "info");
@@ -2869,6 +3002,7 @@ function setScanFile(file) {
     }
     scan.file = file;
     scan.originalUrl = URL.createObjectURL(file);
+    warnLargeFile(file);
     const icon = $("scan-file-icon");
     icon.textContent = ext.toUpperCase().slice(0, 4);
     icon.className = "file-icon kind-image";
@@ -3233,8 +3367,11 @@ function bindPdfEvents() {
     });
 
     $("pdf-remove").addEventListener("click", clearPdfFile);
+    $("pdf-undo").addEventListener("click", undoPdf);
+    $("pdf-redo").addEventListener("click", redoPdf);
     $("pdf-select-all").addEventListener("click", selectAllPdfPages);
     $("pdf-invert").addEventListener("click", invertPdfSelection);
+    $("pdf-copy-selected").addEventListener("click", copySelectedPdfPages);
     $("pdf-rotate-selected").addEventListener("click", rotateSelectedPdfPages);
     $("pdf-delete-selected").addEventListener("click", deleteSelectedPdfPages);
     $("pdf-reset-order").addEventListener("click", resetPdfOrder);
@@ -3350,13 +3487,37 @@ function bindPdfEvents() {
 
 function bindEvents() {
     $("theme-toggle").addEventListener("click", () => {
-        applyTheme(currentTheme() === "dark" ? "light" : "dark");
+        const index = THEME_MODES.indexOf(savedThemeMode());
+        applyTheme(THEME_MODES[(index + 1) % THEME_MODES.length]);
     });
 
     $("nav").addEventListener("click", (event) => {
         const item = event.target.closest(".nav-item");
         if (item) {
             activatePage(item.dataset.page);
+        }
+    });
+
+    document.addEventListener("keydown", (event) => {
+        if (!(event.ctrlKey || event.metaKey) || event.altKey) {
+            return;
+        }
+        if (String(event.key).toLowerCase() !== "z") {
+            return;
+        }
+        const target = event.target;
+        if (target instanceof HTMLElement
+            && (target.matches("input, textarea, select") || target.isContentEditable)) {
+            return;
+        }
+        if (!state.pdf.file || $("pdf-editor").hidden) {
+            return;
+        }
+        event.preventDefault();
+        if (event.shiftKey) {
+            redoPdf();
+        } else {
+            undoPdf();
         }
     });
 

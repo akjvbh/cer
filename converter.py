@@ -1014,6 +1014,13 @@ def pdf_to_png(src: Path, dst_dir: Path, target: str) -> tuple[Path, str]:
 # 图片
 # ---------------------------------------------------------------------------
 
+def _swap_image(current, updated):
+    """替换 PIL 图像时关闭旧对象，避免 exif_transpose / convert 留下句柄。"""
+    if updated is not current and current is not None:
+        current.close()
+    return updated
+
+
 def _image_to_pdf(src: Path, dst_dir: Path, target: str) -> tuple[Path, str]:
     try:
         import fitz
@@ -1032,14 +1039,15 @@ def _image_to_pdf(src: Path, dst_dir: Path, target: str) -> tuple[Path, str]:
         if frames > 1:
             note = f"检测到多帧图片，仅处理第一帧；{note}"
         image.seek(0)
-        image = ImageOps.exif_transpose(image)
+        image = _swap_image(image, ImageOps.exif_transpose(image))
         if image.mode in {"RGBA", "LA", "P"}:
             rgba = image.convert("RGBA")
             background = Image.new("RGB", rgba.size, "white")
             background.paste(rgba, mask=rgba.split()[-1])
-            image = background
+            image = _swap_image(image, background)
+            rgba.close()
         else:
-            image = image.convert("RGB")
+            image = _swap_image(image, image.convert("RGB"))
 
         with tempfile.NamedTemporaryFile(suffix=".jpg", dir=dst_dir, delete=False) as temp:
             tmp_path = Path(temp.name)
@@ -1090,7 +1098,7 @@ def _image_convert(src: Path, dst_dir: Path, target: str) -> tuple[Path, str]:
         image = Image.open(src)
         frames = getattr(image, "n_frames", 1)
         image.seek(0)
-        image = ImageOps.exif_transpose(image)
+        image = _swap_image(image, ImageOps.exif_transpose(image))
         note = f"已转换为 {target.upper()}"
         if frames > 1:
             note = f"检测到多帧图片，仅处理第一帧；{note}"
@@ -1151,7 +1159,7 @@ def _image_to_docx_impl(src: Path, dst_dir: Path, target: str) -> tuple[Path, st
         image = Image.open(src)
         frames = getattr(image, "n_frames", 1)
         image.seek(0)
-        image = ImageOps.exif_transpose(image)
+        image = _swap_image(image, ImageOps.exif_transpose(image))
         converted = image.convert("RGBA") if image.mode in {"RGBA", "LA", "P"} else image.convert("RGB")
         converted.save(tmp_path, "PNG")
         width, height = converted.size
@@ -1463,7 +1471,7 @@ def _compress_image(
         image = Image.open(src)
         frames = getattr(image, "n_frames", 1)
         image.seek(0)
-        image = ImageOps.exif_transpose(image)
+        image = _swap_image(image, ImageOps.exif_transpose(image))
         width, height = image.size
         _report(progress, 20, "正在缩放图片")
         resized = _resize_image(image, spec["max_edge"])
@@ -1538,7 +1546,7 @@ def estimate_compression(src: Path) -> dict:
         try:
             image = Image.open(src)
             image.seek(0)
-            image = ImageOps.exif_transpose(image)
+            image = _swap_image(image, ImageOps.exif_transpose(image))
             levels = {}
             for level, spec in COMPRESS_LEVELS.items():
                 resized = _resize_image(image, spec["max_edge"])
