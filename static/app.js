@@ -2232,7 +2232,7 @@ function renderPdfGrid() {
         return;
     }
 
-    const nodes = visible.map((index) => {
+    const nodes = visible.map((index, position) => {
         const meta = state.pdf.pages[index];
         const offset = Number(state.pdf.rotations[index]) || 0;
         const finalRotation = ((Number(meta.rotation) || 0) + offset + 360) % 360;
@@ -2282,6 +2282,7 @@ function renderPdfGrid() {
         remove.type = "button";
         remove.dataset.action = "delete-page";
         remove.dataset.index = String(index);
+        remove.dataset.position = String(position);
         remove.title = "删除这一页";
         remove.textContent = "×";
         actions.append(rotate, remove);
@@ -2399,15 +2400,23 @@ function rotatePdfPage(index) {
     renderPdfGrid();
 }
 
-function deletePdfPage(index) {
-    const position = state.pdf.order.indexOf(index);
-    if (position < 0) {
+function deletePdfPage(index, position = null) {
+    const at = Number.isInteger(position)
+        && position >= 0
+        && state.pdf.order[position] === index
+        ? position
+        : state.pdf.order.indexOf(index);
+    if (at < 0) {
         return;
     }
     pushPdfHistory();
-    state.pdf.order.splice(position, 1);
+    state.pdf.order.splice(at, 1);
     state.pdf.selected.delete(index);
-    state.pdf.deleted.add(index);
+    if (state.pdf.order.includes(index)) {
+        state.pdf.deleted.delete(index);
+    } else {
+        state.pdf.deleted.add(index);
+    }
     renderPdfGrid();
 }
 
@@ -2478,13 +2487,9 @@ function deleteSelectedPdfPages() {
         return;
     }
     pushPdfHistory();
-    state.pdf.selected.forEach((index) => {
-        const position = state.pdf.order.indexOf(index);
-        if (position >= 0) {
-            state.pdf.order.splice(position, 1);
-        }
-        state.pdf.deleted.add(index);
-    });
+    const selected = new Set(state.pdf.selected);
+    state.pdf.order = state.pdf.order.filter((index) => !selected.has(index));
+    selected.forEach((index) => state.pdf.deleted.add(index));
     state.pdf.selected = new Set();
     renderPdfGrid();
 }
@@ -2531,14 +2536,15 @@ async function exportPdfOps() {
         }
     });
     const deleted = Array.from(state.pdf.deleted).sort((a, b) => a - b);
+    const usableOrder = state.pdf.order.filter((index) => !state.pdf.deleted.has(index));
     const remaining = [];
     for (let index = 1; index <= state.pdf.total; index += 1) {
         if (!state.pdf.deleted.has(index)) {
             remaining.push(index);
         }
     }
-    const orderChanged = state.pdf.order.length !== remaining.length
-        || state.pdf.order.some((value, index) => value !== remaining[index]);
+    const orderChanged = usableOrder.length !== remaining.length
+        || usableOrder.some((value, index) => value !== remaining[index]);
     if (!orderChanged && !deleted.length && !Object.keys(rotationPayload).length) {
         showToast("没有需要应用的修改", "info");
         return;
@@ -2550,7 +2556,7 @@ async function exportPdfOps() {
     setTaskProgress("pdf", 5, "正在提交页面操作");
     const form = new FormData();
     form.append("file", state.pdf.file, state.pdf.file.name);
-    form.append("page_order", JSON.stringify(orderChanged ? state.pdf.order : []));
+    form.append("page_order", JSON.stringify(orderChanged ? usableOrder : []));
     form.append("rotations", JSON.stringify(rotationPayload));
     form.append("delete_pages", JSON.stringify(deleted));
     try {
@@ -3395,7 +3401,7 @@ function bindPdfEvents() {
         if (button.dataset.action === "rotate-page") {
             rotatePdfPage(index);
         } else if (button.dataset.action === "delete-page") {
-            deletePdfPage(index);
+            deletePdfPage(index, Number(button.dataset.position));
         }
     });
     grid.addEventListener("dragstart", (event) => {
