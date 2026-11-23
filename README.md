@@ -186,22 +186,24 @@ curl.exe http://127.0.0.1:8000/api/tasks/<task_id>
 curl.exe -OJ http://127.0.0.1:8000/api/download/<task_id>
 
 rem 批量：同一 target 下可重复 files 字段
-curl.exe -F "files=@a.docx" -F "files=@b.docx" -F "target=pdf" http://127.0.0.1:8000/api/batch
+curl.exe -F "files=@samples\示例_项目说明.docx" -F "files=@samples\示例_文本.txt" -F "target=pdf" http://127.0.0.1:8000/api/batch
 curl.exe -OJ "http://127.0.0.1:8000/api/download/<task_id>?file=0"
 
 rem 压缩与 PDF 工具
 curl.exe -F "file=@samples\示例_论文.pdf" -F "level=60" http://127.0.0.1:8000/api/compress
 curl.exe -F "file=@samples\示例_论文.pdf" http://127.0.0.1:8000/api/compress/estimate
-curl.exe -F "files=@a.pdf" -F "files=@b.pdf" -F "mode=append" http://127.0.0.1:8000/api/pdf/merge
-curl.exe -F "file=@a.pdf" -F "delete_pages=[2]" -F "rotations={\"1\":90}" http://127.0.0.1:8000/api/pdf/ops
-curl.exe -F "file=@a.pdf" -F "limit=10" http://127.0.0.1:8000/api/pdf/preview
-curl.exe -F "files=@a.pdf" -F "max_kb=300" http://127.0.0.1:8000/api/pdf/to-jpg
+curl.exe -F "files=@samples\示例_论文.pdf" -F "files=@samples\示例_英文摘要.pdf" -F "mode=append" http://127.0.0.1:8000/api/pdf/merge
+curl.exe -F "file=@samples\示例_论文.pdf" -F "delete_pages=[2]" -F "rotations={\"1\":90}" http://127.0.0.1:8000/api/pdf/ops
+curl.exe -F "file=@samples\示例_论文.pdf" -F "limit=10" http://127.0.0.1:8000/api/pdf/preview
+curl.exe -F "files=@samples\示例_论文.pdf" -F "max_kb=300" http://127.0.0.1:8000/api/pdf/to-jpg
 
 rem AI 增强（翻译需先在 .env 填 TRANSLATE_API_KEY）
 curl.exe -F "file=@samples\示例_英文摘要.pdf" -F "target_lang=zh" -F "mode=bilingual" http://127.0.0.1:8000/api/translate
 curl.exe -F "file=@samples\示例_英文摘要.pdf" -F "target_lang=zh" -F "mode=layout" http://127.0.0.1:8000/api/translate
 curl.exe -F "file=@samples\示例_扫描照片.jpg" http://127.0.0.1:8000/api/scan-photo
 ```
+
+`<task_id>` 替换为上一条命令返回的 `task_id`。`-OJ` 会尝试使用服务端文件名；如果本机 curl 未识别 `filename*`，文件会保存为 `download.*`，可用 `-o 结果.txt` 指定名字。翻译命令在没有 `.env` 密钥时返回 `400 未配置翻译密钥`，属于预期行为。
 
 ## 降级与已知限制
 
@@ -261,6 +263,9 @@ tests/test_page_semantics.py  页码语义测试（删页/复制/旋转）
 samples/           可直接拖入的示例文件
 uploads/ outputs/  运行时目录（已忽略，不提交）
 docs/prompts/      需求、决策与阶段文档
+docs/DEMO.md       5 分钟演示脚本与翻车兜底
+docs/QA.md         答辩问答与代码证据
+docs/AI-USAGE.md   Qoder 使用方式、规则与真实纠偏案例
 requirements.txt   Python 依赖
 start.bat          Windows 一键启动（自动选端口、写 _start_log.txt）
 CHANGELOG.md       分阶段变更记录
